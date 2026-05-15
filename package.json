@@ -1,0 +1,29 @@
+{
+  "name": "hermes-agent",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "ask": "tsx src/cli/ask.ts",
+    "build": "tsc",
+    "test": "node --import tsx --test \"test/**/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "test:deepseek:bw": "node src/hermes-cache-test.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@bitwarden/cli": "^2026.4.1",
+    "dotenv": "^17.4.2",
+    "openai": "^6.37.0",
+    "pino": "^10.3.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "tsx": "^4.22.0",
+    "typescript": "^6.0.3"
+  }
+}
