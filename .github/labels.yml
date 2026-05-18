@@ -1,0 +1,103 @@
+# GitHub Labels — single source of truth
+# 同期: .github/workflows/sync-labels.yml が main 更新時に gh label で同期する。
+# 手動同期: sh scripts/sync-labels.sh
+#
+# 軸:
+#   status:    タスクの状態
+#   owner:     担当（AI / 人間）
+#   priority:  優先度
+#   type:      タスクの性質
+#   area:      対象領域（プロジェクトごとに編集）
+
+# --- status (タスク状態) ---
+- name: "status: todo"
+  color: "ededed"
+  description: "未着手"
+- name: "status: in-progress"
+  color: "0e8a16"
+  description: "進行中"
+- name: "status: blocked"
+  color: "b60205"
+  description: "ブロック中（理由はコメント）"
+- name: "status: review-pending"
+  color: "fbca04"
+  description: "AI 実装完了。review agent (claude-pr-review) 確認中（ADR-0003）"
+- name: "status: evidence-required"
+  color: "fbca04"
+  description: "AI が evidence を貼った状態。人間 acceptance 待ち（ADR-0003）"
+- name: "status: accepted"
+  color: "0e8a16"
+  description: "人間が evidence を確認 OK。close 待ち（ADR-0003）"
+- name: "status: ready-for-close"
+  color: "1d76db"
+  description: "AI による完了申請。close は人間のみ"
+
+# --- owner (担当) ---
+- name: "owner: claude"
+  color: "c5def5"
+  description: "Claude Code が担当"
+- name: "owner: codex"
+  color: "d4c5f9"
+  description: "Codex が担当"
+- name: "owner: human"
+  color: "fef2c0"
+  description: "人間が担当"
+
+# --- priority ---
+- name: "priority: high"
+  color: "d93f0b"
+- name: "priority: medium"
+  color: "fbca04"
+- name: "priority: low"
+  color: "c2e0c6"
+
+# --- type ---
+- name: "type: feature"
+  color: "0075ca"
+- name: "type: bug"
+  color: "d73a4a"
+- name: "type: investigation"
+  color: "a2eeef"
+- name: "type: refactor"
+  color: "5319e7"
+
+# --- model (どの強さのモデルで進めるか) ---
+- name: "model: cheap-ok"
+  color: "c2e0c6"
+  description: "軽量モデル（Haiku 等）で足りる：候補抽出・整形・要約"
+- name: "model: standard"
+  color: "fbca04"
+  description: "標準モデル（Sonnet 等）：既存パターンに沿った実装・テスト追加"
+- name: "model: strong-required"
+  color: "d93f0b"
+  description: "強いモデル（Opus 等）必須：認可/DB/状態管理/曖昧仕様/根本原因調査"
+
+# --- 振り返り（完了時に自分で貼る） ---
+- name: "cost: overrun"
+  color: "5319e7"
+  description: "完了時の振り返り：想定より燃えた（軽量で済むと思ったが手戻りした 等）"
+- name: "model: was-overkill"
+  color: "5319e7"
+  description: "完了時の振り返り：strong を使ったが standard で足りた"
+
+# --- rework (AI review feedback による手戻り回数。rework-tracker.yml が自動付与) ---
+- name: "rework: 1"
+  color: "fbca04"
+  description: "AI review で changes-requested-major を1回受けた"
+- name: "rework: 2"
+  color: "d93f0b"
+  description: "AI review で changes-requested-major を2回受けた"
+- name: "rework: 3+"
+  color: "b60205"
+  description: "AI review で changes-requested-major を3回以上受けた（仕様再考の合図）"
+
+# --- area (プロジェクトごとに追加・削除する) ---
+- name: "area: handoff"
+  color: "bfd4f2"
+  description: "AI handoff / タスク管理周り"
+- name: "area: ci"
+  color: "bfd4f2"
+- name: "area: docs"
+  color: "bfd4f2"
+- name: "area: other"
+  color: "bfd4f2"

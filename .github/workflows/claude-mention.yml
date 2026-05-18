@@ -1,0 +1,106 @@
+name: Claude @mention
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+  issues:
+    types: [assigned]
+
+permissions: {}
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      has_token: ${{ steps.check.outputs.has_token }}
+      trusted_context: ${{ steps.trust.outputs.trusted_context }}
+    steps:
+      - id: check
+        env:
+          T: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          if [ -n "$T" ]; then
+            echo "has_token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::CLAUDE_CODE_OAUTH_TOKEN is not configured for this repository — skipping @claude responder. Set the secret to enable."
+          fi
+
+      - id: trust
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_IS_PR: ${{ github.event.issue.pull_request != null }}
+          REVIEW_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -euo pipefail
+
+          trusted=true
+
+          if [ "$EVENT_NAME" = "pull_request_review_comment" ]; then
+            if [ "$REVIEW_HEAD_REPO" != "$REPO" ]; then
+              trusted=false
+            fi
+          elif [ "$EVENT_NAME" = "issue_comment" ] && [ "$ISSUE_IS_PR" = "true" ]; then
+            head_repo="$(gh api "repos/$REPO/pulls/$ISSUE_NUMBER" --jq '.head.repo.full_name')"
+            if [ "$head_repo" != "$REPO" ]; then
+              trusted=false
+            fi
+          fi
+
+          echo "trusted_context=$trusted" >> "$GITHUB_OUTPUT"
+          if [ "$trusted" != "true" ]; then
+            echo "::warning::Skipping @claude responder for external fork PR context."
+          fi
+
+  respond:
+    needs: preflight
+    if: |
+      needs.preflight.outputs.has_token == 'true' &&
+      needs.preflight.outputs.trusted_context == 'true' &&
+      (
+        (github.event.comment != null && contains(github.event.comment.body, '@claude')) ||
+        (github.event.action == 'assigned' && github.event.assignee.login == 'claude')
+      )
+    runs-on: ubuntu-latest
+    environment: claude  # CLAUDE_CODE_OAUTH_TOKEN は env: claude に格納
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+      id-token: write
+      actions: read  # claude-code-action queries GET /repos/:o/:r/actions/runs to attach job links
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          track_progress: true
+          prompt: |
+            REPO: ${{ github.repository }}
+            EVENT: ${{ github.event_name }}
+            ISSUE/PR NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
+
+            あなたはこの Issue/PR の担当 AI。ユーザーから @claude で呼ばれた、または assign された。CLAUDE.md / docs/handoff/README.md / docs/handoff/ai-execution.md のルールを厳守する。
+
+            手順:
+            1. `gh issue view <n>` または `gh pr view <n>` で Issue/PR の現状を取得
+            2. 既存ラベル（特に `model:` `status:` `owner:`）を確認
+            3. ユーザーの依頼内容に応じて：質問応答 / 調査 / 実装 / レビュー
+            4. 進捗は track_progress コメントに任せる（手書きの経過コメントは追加しない）
+            5. 完了したら `status: ready-for-close` を付け、Result / Verification / Changed files を含む最終コメントを1件残す
+
+            **やってはいけないこと**:
+            - Issue を close しない（人間のみ）
+            - 本文を編集しない（objective / scope / checklist 以外）
+            - commit message から `#<issue>` を省略しない
+            - `--no-verify` で hook を回避しない
+          claude_args: |
+            --allowedTools "Bash(gh issue:*),Bash(gh pr:*),Bash(gh label list:*),Bash(npm run typecheck:*),Bash(npm run build:*),Bash(npm test:*),Bash(git:*)"
