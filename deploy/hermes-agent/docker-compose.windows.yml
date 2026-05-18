@@ -3,9 +3,10 @@
 # Differences vs upstream docker-compose.yml:
 #   - network_mode: host removed (not supported on Docker Desktop for Windows).
 #   - Explicit ports: dashboard 9119 bound to 127.0.0.1 only.
-#   - Volume points to the host path defined by HERMES_DATA (.env), defaulting
-#     to C:\Users\<you>\.hermes so the data survives worktree cleanup, image
-#     rebuilds, and is portable to any future VPS / Mini PC.
+#   - State volume is a named Docker volume (`hermes-data`), NOT a host
+#     bind-mount. Tokens in /opt/data/auth.json are no longer readable from
+#     the host filesystem. Migration / portability now goes through the BW
+#     vault (scripts/hermes-restore.ps1), not tar of ~/.hermes.
 #
 # Place this file inside the cloned hermes-agent repo (build context = `.`),
 # or run it with `docker compose -f /abs/path/to/docker-compose.windows.yml
@@ -27,7 +28,24 @@ services:
     container_name: hermes
     restart: unless-stopped
     volumes:
-      - "${HERMES_DATA:-${USERPROFILE}/.hermes}:/opt/data"
+      # Named volume (was bind-mount to ${USERPROFILE}/.hermes). Moved off
+      # the host filesystem so OAuth refresh tokens in auth.json are no
+      # longer readable by user-level processes (Codex Sandbox group, sync
+      # tools, malware running as the user, etc.). The volume lives in
+      # Docker's storage area (Windows: C:\ProgramData\Docker\volumes) and
+      # is reachable only via the docker socket.
+      #
+      # Migration from the old bind-mount layout is one-shot via
+      # scripts/migrate-to-named-volume.ps1. Backups now go through the
+      # docker socket (see scripts/backup.ps1). VPS / Mini PC migration
+      # uses the BW vault as the source of truth (hermes-restore.ps1).
+      - "hermes-data:/opt/data"
+      # Projects workspace — the directory tree that holds every repo you
+      # want Hermes to operate on. Mounted read-write so the agent can edit
+      # source files. Each subdirectory becomes /workspace/<project> inside
+      # the container; pick the one you want with `hermes-on.ps1 <name>` or
+      # `docker exec -w /workspace/<name> ...`.
+      - "${HERMES_PROJECTS:-${USERPROFILE}/Documents/Git}:/workspace:rw"
     environment:
       - HERMES_UID=10000
       - HERMES_GID=10000
@@ -56,7 +74,18 @@ services:
     depends_on:
       - gateway
     volumes:
-      - "${HERMES_DATA:-${USERPROFILE}/.hermes}:/opt/data"
+      # Named volume (was bind-mount to ${USERPROFILE}/.hermes). Moved off
+      # the host filesystem so OAuth refresh tokens in auth.json are no
+      # longer readable by user-level processes (Codex Sandbox group, sync
+      # tools, malware running as the user, etc.). The volume lives in
+      # Docker's storage area (Windows: C:\ProgramData\Docker\volumes) and
+      # is reachable only via the docker socket.
+      #
+      # Migration from the old bind-mount layout is one-shot via
+      # scripts/migrate-to-named-volume.ps1. Backups now go through the
+      # docker socket (see scripts/backup.ps1). VPS / Mini PC migration
+      # uses the BW vault as the source of truth (hermes-restore.ps1).
+      - "hermes-data:/opt/data"
     environment:
       - HERMES_UID=10000
       - HERMES_GID=10000
@@ -74,3 +103,11 @@ services:
     #   overrides that refusal. Exposure is bounded by the `ports:` line above
     #   which only publishes to the host's 127.0.0.1 — LAN cannot reach it.
     #   For LAN/remote access use SSH tunneling, NOT 0.0.0.0 on the host side.
+
+volumes:
+  hermes-data:
+    # Declared with no driver_opts so Docker manages the storage path
+    # itself. On Windows + Docker Desktop this lives inside the WSL2 VM's
+    # disk; on Linux hosts under /var/lib/docker/volumes/. Backups go
+    # through scripts/backup.ps1 (which runs a one-shot alpine container
+    # to tar the volume contents).

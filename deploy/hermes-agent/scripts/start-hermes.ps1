@@ -1,114 +1,101 @@
-# start-hermes.ps1 — Bitwarden-piped Hermes Agent launcher.
+# start-hermes.ps1 — Boot the Hermes container with API keys fetched from
+# Bitwarden via the shared session helper.
 #
-# Flow:
-#   1. Ensure Bitwarden CLI vault is unlocked (prompt if needed).
-#   2. Pull DEEPSEEK_API_KEY out of the vault item (no plaintext file written).
-#   3. Inject as process env var; docker compose passes it into the container.
-#   4. Clear the host env var on this shell when done.
+# Responsibility split (Phase-3 redesign):
+#   - This script ONLY fetches per-boot env-injected keys (DEEPSEEK_API_KEY
+#     etc.). The OAuth refresh credentials in auth.json live on the
+#     `hermes-data` named volume and persist across container restarts —
+#     they are NOT touched here.
+#   - First-time install / disaster recovery seeds the named volume from
+#     Bitwarden via scripts/hermes-restore.ps1.
+#   - Graceful shutdown + final BW push goes through scripts/stop-hermes.ps1.
+#
+# Bitwarden item layout (single consolidated item):
+#   Name : "Hermes Auth State"  (overridable via -BwItem)
+#   Type : Secure Note
+#   Custom fields (all hidden type):
+#     deepseek_api_key   : sk-...                    (this script reads)
+#     auth_json_b64      : base64 of /opt/data/auth.json  (restore/sync read)
 #
 # Usage:
-#   pwsh ./scripts/start-hermes.ps1                              # default item "DeepSeek API Key"
-#   pwsh ./scripts/start-hermes.ps1 -Item "MyVaultEntry"
-#   pwsh ./scripts/start-hermes.ps1 -HermesDir D:\hermes-agent
-#
-# Prereqs:
-#   - Node.js on PATH (npx ships with it).
-#   - Bitwarden CLI used via `npx -y @bitwarden/cli` (no global install needed).
-#   - `bw login` once: `npx -y @bitwarden/cli login`
-#
-# Security:
-#   - The key never lands on disk in this repo. compose receives it from the
-#     parent process env, then forwards it into the container via the
-#     `environment:` block in docker-compose.windows.yml.
-#   - The container DOES retain the env var in its process env (visible to
-#     `docker inspect`). That's a Docker limit, not a script limit.
+#   pwsh ./scripts/start-hermes.ps1
+#   pwsh ./scripts/start-hermes.ps1 -Rebuild
+#   pwsh ./scripts/start-hermes.ps1 -BwItem "My Custom Vault Entry"
 
 [CmdletBinding()]
 param(
-    [string]$Item       = "DeepSeek API Key",
-    [string]$FieldName  = "DEEPSEEK_API_KEY",
-    [string]$HermesDir  = "$env:USERPROFILE\hermes-agent",
+    [string]$BwItem      = "Hermes Auth State",
+    [string]$HermesDir   = "$env:USERPROFILE\hermes-agent",
     [string]$ComposeFile = "docker-compose.windows.yml",
     [switch]$Rebuild
 )
 
 $ErrorActionPreference = 'Stop'
-$Bw = @("npx", "-y", "@bitwarden/cli")
 
-function Invoke-Bw {
-    param([string[]]$BwArgs)
-    & $Bw[0] $Bw[1..($Bw.Length - 1)] @BwArgs 2>$null
-}
+# Constants — field names are pinned, not parametric. Changing them means
+# also editing the BW vault item, so a parameter would just invite drift.
+$BW_FIELD_DEEPSEEK = 'deepseek_api_key'
 
-# 1. Unlock vault if needed
-Write-Host "Checking Bitwarden vault status..." -ForegroundColor Cyan
-$statusJson = Invoke-Bw @("status")
-if (-not $statusJson) { Write-Error "bw status failed — is Node.js installed and `bw login` done?"; exit 1 }
-$status = $statusJson | ConvertFrom-Json
+Import-Module "$PSScriptRoot\bw-session.psm1" -Force
 
-if ($status.status -ne "unlocked") {
-    if ($status.status -eq "unauthenticated") {
-        Write-Error "Bitwarden not logged in. Run: npx -y @bitwarden/cli login"
-        exit 1
-    }
-    Write-Host "Vault is $($status.status). Unlocking (enter master password)..." -ForegroundColor Yellow
-    $session = & $Bw[0] $Bw[1..($Bw.Length - 1)] unlock --raw
-    if (-not $session) { Write-Error "Unlock failed."; exit 1 }
-    $env:BW_SESSION = $session
-}
+# 1. Unlock vault (cache-hit silent / cache-miss prompts master password).
+Write-Host "Checking Bitwarden vault..." -ForegroundColor Cyan
+$session = Get-BwSession
+$env:BW_SESSION = $session
 
-# 1b. Sync vault — items created on the web are invisible to the CLI until
-#     `bw sync` runs. Cheap (~1s) so always do it.
-Write-Host "Syncing vault..." -ForegroundColor Cyan
-& $Bw[0] $Bw[1..($Bw.Length - 1)] sync --session $env:BW_SESSION 2>&1 | Out-Null
-
-# 2. Fetch key from vault
-Write-Host "Fetching '$Item' / field '$FieldName'..." -ForegroundColor Cyan
-$itemJson = & $Bw[0] $Bw[1..($Bw.Length - 1)] get item $Item --session $env:BW_SESSION
-if (-not $itemJson) { Write-Error "Vault item '$Item' not found."; exit 1 }
-$itemObj = $itemJson | ConvertFrom-Json
-
-$apiKey = $null
-$field = $itemObj.fields | Where-Object { $_.name -eq $FieldName } | Select-Object -First 1
-if ($field) {
-    $apiKey = $field.value
-} elseif ($itemObj.login.password -like 'sk-*') {
-    $apiKey = $itemObj.login.password
-}
-
+# 2. Fetch the one key this script needs. Older runs of start-hermes used
+#    to pull the entire item and dig out one field; with Get-BwField the
+#    intent is explicit and the rest of the item stays in BW's memory.
+Write-Host "Fetching '$BwItem' / '$BW_FIELD_DEEPSEEK'..." -ForegroundColor Cyan
+$apiKey = Get-BwField -Item $BwItem -FieldName $BW_FIELD_DEEPSEEK
 if (-not $apiKey) {
-    Write-Error "Could not extract API key. Tried field '$FieldName' then login.password (sk-* prefix)."
-    exit 1
+    throw "Field '$BW_FIELD_DEEPSEEK' missing or empty in BW item '$BwItem'."
 }
 
-$redacted = if ($apiKey.Length -gt 10) { "$($apiKey.Substring(0,4))...$($apiKey.Substring($apiKey.Length-4))" } else { "[redacted]" }
-Write-Host "Loaded DEEPSEEK_API_KEY ($redacted)" -ForegroundColor Green
+$redacted = if ($apiKey.Length -gt 8) {
+    # Only show last 4. The `sk-` prefix is a constant and the first 4
+    # chars add no signal but increase shoulder-surfing surface area.
+    "...$($apiKey.Substring($apiKey.Length-4))"
+} else { "[redacted]" }
+Write-Host "Loaded DEEPSEEK_API_KEY ($redacted, $($apiKey.Length) chars)" -ForegroundColor Green
 
-# 3. Inject and launch
+# 3. Inject into env and launch. Compose forwards via `environment:` block.
 $env:DEEPSEEK_API_KEY = $apiKey
 try {
     Push-Location $HermesDir
     if (-not (Test-Path $ComposeFile)) {
-        Write-Error "Compose file not found: $HermesDir\$ComposeFile"
-        exit 1
+        throw "Compose file not found: $HermesDir\$ComposeFile"
     }
 
-    $args = @("compose", "-f", $ComposeFile, "up", "-d")
-    if ($Rebuild) { $args += "--build" }
+    $composeArgs = @("compose", "-f", $ComposeFile, "up", "-d")
+    if ($Rebuild) { $composeArgs += "--build" }
 
-    Write-Host "Running: docker $($args -join ' ')" -ForegroundColor Cyan
-    & docker @args
-    $exit = $LASTEXITCODE
+    Write-Host "Running: docker $($composeArgs -join ' ')" -ForegroundColor Cyan
+    & docker @composeArgs
+    if ($LASTEXITCODE -ne 0) { throw "docker compose up failed (exit $LASTEXITCODE)" }
 
-    if ($exit -ne 0) { Write-Error "docker compose up failed (exit $exit)"; exit $exit }
+    # 4. Sanity check: did the named volume get auth.json seeded? If not,
+    #    Hermes will start with no OAuth providers configured — surface a
+    #    clear hint pointing to hermes-restore.ps1 instead of letting the
+    #    user wonder why anthropic/codex appear logged-out.
+    $volProbe = docker run --rm -v hermes-data:/data alpine sh -c "test -s /data/auth.json && echo yes || echo no" 2>$null
+    if ($volProbe.Trim() -ne 'yes') {
+        Write-Warning "hermes-data volume has no auth.json — OAuth providers (Codex, Anthropic OAuth) will be offline."
+        Write-Warning "Run scripts/hermes-restore.ps1 to seed the volume from the BW vault."
+    }
 
     Write-Host "OK. Dashboard: http://127.0.0.1:9119" -ForegroundColor Green
     Write-Host "Logs:         docker compose -f $ComposeFile logs -f gateway"
-    Write-Host "Shell in:     docker exec -it hermes hermes"
+    Write-Host "Shell in:     docker exec -it hermes /opt/hermes/.venv/bin/hermes"
+    Write-Host "Stop cleanly: pwsh $PSScriptRoot\stop-hermes.ps1"
 } finally {
     Pop-Location -ErrorAction SilentlyContinue
-    # 4. Scrub the host env var; the container already has its own copy.
-    $env:DEEPSEEK_API_KEY = $null
-    # BW_SESSION intentionally kept in this shell so subsequent script runs
-    # don't re-prompt. Close the shell or run `bw lock` to invalidate.
+    # Container has its own env copy; scrub the host shell var so a later
+    # `printenv` or screen-share doesn't leak it. `$env:X = $null` keeps
+    # the variable present with empty value on PS 5.1 — use the .NET API
+    # to actually remove it from the process env block.
+    [Environment]::SetEnvironmentVariable('DEEPSEEK_API_KEY', $null, 'Process')
+    # Intentionally leave BW_SESSION populated — keeps subsequent script
+    # calls in this shell silent. DPAPI cache means even a fresh shell
+    # stays silent until reboot anyway.
 }
