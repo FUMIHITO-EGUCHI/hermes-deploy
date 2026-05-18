@@ -1,0 +1,76 @@
+# docker-compose.windows.yml — Hermes Agent (Windows + Docker Desktop / WSL2 backend)
+#
+# Differences vs upstream docker-compose.yml:
+#   - network_mode: host removed (not supported on Docker Desktop for Windows).
+#   - Explicit ports: dashboard 9119 bound to 127.0.0.1 only.
+#   - Volume points to the host path defined by HERMES_DATA (.env), defaulting
+#     to C:\Users\<you>\.hermes so the data survives worktree cleanup, image
+#     rebuilds, and is portable to any future VPS / Mini PC.
+#
+# Place this file inside the cloned hermes-agent repo (build context = `.`),
+# or run it with `docker compose -f /abs/path/to/docker-compose.windows.yml
+# --project-directory C:\path\to\hermes-agent up -d`.
+#
+# Usage (from the cloned hermes-agent repo root):
+#   copy ..\hermes\deploy\hermes-agent\docker-compose.windows.yml .
+#   copy ..\hermes\deploy\hermes-agent\.env.template .env   # then edit keys
+#   docker compose -f docker-compose.windows.yml up -d
+#
+# Security notes:
+#   - Dashboard binds 127.0.0.1 only. Do NOT change to 0.0.0.0 without auth.
+#   - The .env file holds API keys — never commit it. .gitignore must cover it.
+
+services:
+  gateway:
+    build: .
+    image: hermes-agent
+    container_name: hermes
+    restart: unless-stopped
+    volumes:
+      - "${HERMES_DATA:-${USERPROFILE}/.hermes}:/opt/data"
+    environment:
+      - HERMES_UID=10000
+      - HERMES_GID=10000
+      # API keys are injected from the parent shell (e.g. scripts/start-hermes.ps1
+      # which pulls them out of Bitwarden). The :? syntax fails compose-up loudly
+      # if the var is unset — preferable to silently starting with no provider.
+      # Add more providers here as you wire them up; keep the same pattern.
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY must be set — run scripts/start-hermes.ps1}
+      # Optional extras — uncomment as needed (don't add :? to optionals)
+      # - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      # - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      # Uncomment to enable the OpenAI-compatible API server on localhost.
+      # Both lines are required; API_SERVER_KEY is mandatory.
+      # - API_SERVER_HOST=127.0.0.1
+      # - API_SERVER_KEY=${API_SERVER_KEY}
+    env_file:
+      # Non-secret settings only (HERMES_DATA, model defaults, messenger IDs).
+      # Secrets come via the `environment:` block above from the parent shell.
+      - .env
+    command: ["gateway", "run"]
+
+  dashboard:
+    image: hermes-agent
+    container_name: hermes-dashboard
+    restart: unless-stopped
+    depends_on:
+      - gateway
+    volumes:
+      - "${HERMES_DATA:-${USERPROFILE}/.hermes}:/opt/data"
+    environment:
+      - HERMES_UID=10000
+      - HERMES_GID=10000
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY must be set — run scripts/start-hermes.ps1}
+    env_file:
+      - .env
+    ports:
+      # Localhost-only. For remote access, SSH-tunnel: ssh -L 9119:localhost:9119
+      - "127.0.0.1:9119:9119"
+    command: ["dashboard", "--host", "0.0.0.0", "--no-open", "--insecure"]
+    # Why --insecure is acceptable here:
+    #   Dashboard binds 0.0.0.0 INSIDE the container (necessary because Docker
+    #   port mapping cannot reach a container's loopback). Hermes refuses
+    #   0.0.0.0 by default since the dashboard exposes API keys. --insecure
+    #   overrides that refusal. Exposure is bounded by the `ports:` line above
+    #   which only publishes to the host's 127.0.0.1 — LAN cannot reach it.
+    #   For LAN/remote access use SSH tunneling, NOT 0.0.0.0 on the host side.

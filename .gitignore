@@ -4,6 +4,7 @@ coverage/
 .env
 .env.*
 !.env.example
+!deploy/hermes-agent/.env.template
 *.log
 .local/
 tmp/
