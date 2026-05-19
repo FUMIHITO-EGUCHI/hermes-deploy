@@ -128,7 +128,6 @@ docker run --rm `
             chmod 600 /dest/.staging/auth.json
         fi
         if [ -f /dest/.staging/.claude/.credentials.json ]; then
-            chmod 600 /dest/.staging/.credentials.json 2>/dev/null || \
             chmod 600 /dest/.staging/.claude/.credentials.json
         fi
         # Atomic-ish promotion: move everything out of staging into /dest.

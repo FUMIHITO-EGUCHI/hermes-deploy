@@ -42,12 +42,17 @@ Import-Module "$PSScriptRoot\bw-session.psm1" -Force
 # Helpers
 # -----------------------------------------------------------------------------
 
-function Get-StringHash {
-    param([string]$s)
-    $bytes = [Text.Encoding]::UTF8.GetBytes($s)
+function Get-BytesSha256 {
+    # Direct byte[] → SHA256 hex string, matching `sha256sum` on the
+    # container side (which hashes the raw file bytes). Earlier this was
+    # `byte[] → UTF-8 string → re-encode → SHA256`, which round-trips
+    # cleanly for ASCII JSON but can produce a false mismatch against
+    # `sha256sum` if the input contains a BOM or any non-UTF-8 byte. Now
+    # both sides hash the same byte sequence.
+    param([byte[]]$Bytes)
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
-        return ([BitConverter]::ToString($sha.ComputeHash($bytes)) -replace '-', '').ToLower()
+        return ([BitConverter]::ToString($sha.ComputeHash($Bytes)) -replace '-', '').ToLower()
     } finally { $sha.Dispose() }
 }
 
@@ -101,8 +106,10 @@ function Invoke-PullFromBw {
     Assert-ValidAuthJson -Bytes $decoded
 
     # Idempotency: compare hash of incoming bytes against volume's current
-    # auth.json. Skip the write if identical.
-    $incomingHash = (Get-StringHash ([Text.Encoding]::UTF8.GetString($decoded)))
+    # auth.json. Skip the write if identical. Both sides hash raw bytes
+    # (no UTF-8 round-trip) so the comparison stays symmetric even if the
+    # file ever picks up a BOM or non-UTF-8 byte.
+    $incomingHash = Get-BytesSha256 -Bytes $decoded
     $currentHash  = Get-VolumeAuthJsonHash
     if ($currentHash -eq $incomingHash -and -not $Force) {
         Write-Host "Volume already has identical auth.json (sha=$($currentHash.Substring(0,12))...). Nothing to do." -ForegroundColor Green
@@ -164,7 +171,10 @@ function Invoke-PushToBw {
     catch { throw "Volume auth.json base64 decode failed: $_" }
     Assert-ValidAuthJson -Bytes $bytes
 
-    $hash = (Get-StringHash $b64).Substring(0, 12)
+    # Log only — hash the decoded auth.json bytes (matches what
+    # `sha256sum /data/auth.json` would print, so an operator can
+    # cross-check the push against the volume).
+    $hash = (Get-BytesSha256 -Bytes $bytes).Substring(0, 12)
     Write-Host "Will push $($b64.Length) chars of base64 (sha=$hash...) to BW field '$BW_FIELD_AUTH_JSON'." -ForegroundColor Cyan
 
     if (-not $Force) {

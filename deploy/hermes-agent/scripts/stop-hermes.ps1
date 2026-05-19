@@ -79,7 +79,10 @@ if ($SkipPush) {
         $pushFailed = $true
         $msg = "BW push failed: $_. Volume still holds latest auth.json — next start-hermes will work, but a freshly-cloned host won't see the rotated credentials until you re-run hermes-restore.ps1 -Push."
         if ($IgnorePushFailure) {
-            Write-Warning $msg
+            # Prefix で「読み飛ばし注意」を明示。-IgnorePushFailure を渡している
+            # ということは、運用上「停止できれば良い」意思表示があった訳だが、
+            # それでも push 失敗そのものは後で必ず人間が拾い直す必要がある。
+            Write-Warning "[ACTION REQUIRED] $msg"
         } else {
             Write-Error $msg
             exit 2

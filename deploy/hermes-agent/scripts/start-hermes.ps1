@@ -95,7 +95,10 @@ try {
     # the variable present with empty value on PS 5.1 — use the .NET API
     # to actually remove it from the process env block.
     [Environment]::SetEnvironmentVariable('DEEPSEEK_API_KEY', $null, 'Process')
-    # Intentionally leave BW_SESSION populated — keeps subsequent script
-    # calls in this shell silent. DPAPI cache means even a fresh shell
-    # stays silent until reboot anyway.
+    # BW_SESSION も scrub: DPAPI キャッシュが次回起動の沈黙役を担うので、
+    # シェル変数として残し続ける利得はほぼなく、`printenv`・Process
+    # Explorer・子プロセスへの継承で覗かれる微小リスクのほうが大きい。
+    # `$env:X = $null` は PS 5.1 だと空値で残ってしまうので .NET API で
+    # プロセス環境ブロックから物理的に削除する。
+    [Environment]::SetEnvironmentVariable('BW_SESSION', $null, 'Process')
 }

@@ -63,6 +63,12 @@ $DEFAULT_PROVIDER_AUTOROUTE = 'deepseek'
 $DEFAULT_SKILLS_AUTOROUTE   = 'auto-route-deepseek'
 $AUTOROUTE_SKILL_NAME       = 'auto-route-deepseek'
 
+# param() の `[string]$Foo = "default"` 形式を使うと「ユーザが既定値を
+# 受け入れた」ケースと「ユーザが明示的にその値を渡した」ケースの区別が
+# 失われる。AutoRoute モード時は既定モデル/プロバイダ/スキルが切り替わる
+# が、ユーザが `-Model` を明示指定したらそれを優先したい。
+# `$PSBoundParameters.ContainsKey` は呼び出し元が値を渡したかを返すので、
+# 「未指定の時だけモード別の既定を当てる」分岐がここで成立する。
 if ($AutoRoute) {
     if (-not $PSBoundParameters.ContainsKey('Model'))    { $Model    = $DEFAULT_MODEL_AUTOROUTE }
     if (-not $PSBoundParameters.ContainsKey('Provider')) { $Provider = $DEFAULT_PROVIDER_AUTOROUTE }
