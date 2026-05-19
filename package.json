@@ -1,7 +1,7 @@
 {
-  "name": "hermes-agent",
+  "name": "hermes-deploy",
   "version": "1.0.0",
-  "description": "",
+  "description": "Hermes Agent self-host deployment (Windows + Docker today; Linux/ARM in scope).",
   "main": "index.js",
   "scripts": {
     "ask": "tsx src/cli/ask.ts",
@@ -12,7 +12,7 @@
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "type": "module",
   "dependencies": {
     "@bitwarden/cli": "^2026.4.1",

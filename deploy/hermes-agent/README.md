@@ -219,7 +219,7 @@ container has been (re)created since the mount was added.
 `.env`:
 ```dotenv
 # Defaults to ${USERPROFILE}/Documents/Git on Windows if unset.
-HERMES_PROJECTS="C:/Users/kurah/Documents/Git"
+HERMES_PROJECTS="C:/Users/<you>/Documents/Git"
 ```
 
 Apply (no full rebuild needed — just recreate so the new bind mount is
