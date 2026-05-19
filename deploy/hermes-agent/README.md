@@ -8,17 +8,20 @@ move to a VPS or Mini PC tomorrow with zero config drift.
 
 Data and config are split into three movable pieces:
 
-| Piece                          | Where                                   | Portable? |
-|--------------------------------|-----------------------------------------|-----------|
-| `docker-compose.windows.yml`   | Versioned in this repo                  | Yes       |
-| `.env` (non-secret config)     | Local file (gitignored)                 | Manual copy |
-| API keys (DeepSeek, etc.)      | Bitwarden vault                         | Migrate vault, not file |
-| `~/.hermes` (state + skills)   | `C:\Users\<you>\.hermes` (host volume)  | tar.gz transfer |
+| Piece                          | Where                                       | Portable?                |
+|--------------------------------|---------------------------------------------|--------------------------|
+| `docker-compose.windows.yml`   | Versioned in this repo                      | Yes                      |
+| `.env` (non-secret config)     | Local file (gitignored)                     | Manual copy              |
+| All secrets (API keys + OAuth) | **Bitwarden vault** (item "Hermes Auth State") | Migrate vault, not files |
+| Hermes state (named volume)    | Docker `hermes-data` volume (not on host FS)| Re-seeded from BW vault  |
 
-API keys never touch disk: `scripts/start-hermes.ps1` unlocks Bitwarden and
-pipes them into the container's process env at launch. To move to another
-machine: copy compose + `.env` + `~/.hermes`, install Docker and Bitwarden
-CLI (`npx -y @bitwarden/cli login`), run `start-hermes.ps1`.
+Secrets never touch the host filesystem: `scripts/start-hermes.ps1` unlocks
+Bitwarden via a DPAPI-cached session and pipes the per-boot keys into the
+container's process env. The OAuth refresh tokens (Codex device-code,
+Anthropic sk-ant-oat01) live in a Docker named volume reachable only via
+the docker socket. To stand up a new host: install Docker + BW CLI, run
+`hermes-restore.ps1` (BW → volume), then `start-hermes.ps1`. See
+**[VPS / Mini PC migration](#vps--mini-pc-migration-with-bw-as-source-of-truth)** below for the full flow.
 
 ---
 
@@ -64,13 +67,23 @@ Copy-Item "$DEPLOY\.env.template" .env
 The template carries no secrets — just `HERMES_DATA` and optional defaults.
 For most setups the defaults are fine; just save it as-is.
 
-### 4. Store the DeepSeek key in Bitwarden
+### 4. Set up the Bitwarden vault item
 
-Create a vault item (any name; the launcher defaults to `"DeepSeek API Key"`)
-with one of the following:
+This deployment uses a **single consolidated BW item** as the source of
+truth for every secret. The item layout is hard-coded in the launcher
+scripts (changing names means editing the vault, not the scripts):
 
-- **Custom field** named `DEEPSEEK_API_KEY` with the key as the value, OR
-- **Login password** containing the raw `sk-...` key.
+| Field            | Type   | Holds                                                | Set by                    |
+|------------------|--------|------------------------------------------------------|---------------------------|
+| `deepseek_api_key` | hidden | DeepSeek `sk-...` key (static)                       | you, once                 |
+| `auth_json_b64`  | hidden | base64 of the live `auth.json` (OAuth refresh tokens) | `hermes-restore.ps1 -Push` |
+
+Create it:
+
+1. Open Bitwarden web vault → New item → Type: **Secure Note** → Name: `Hermes Auth State`
+2. Add a **custom field**, type **Hidden**, name `deepseek_api_key`, value = your DeepSeek key.
+3. (Leave `auth_json_b64` for later — the first `hermes-restore.ps1 -Push` creates it.)
+4. Save.
 
 Make sure the Bitwarden CLI is logged in once on this machine:
 
@@ -78,11 +91,20 @@ Make sure the Bitwarden CLI is logged in once on this machine:
 npx -y @bitwarden/cli login        # one-time interactive login
 ```
 
-### 5. Pre-create the data directory
+The launcher scripts use a DPAPI-encrypted session cache
+(`~/.hermes-cache/bw_session.dpapi`), so **you only enter the master
+password once per Windows login** — start-hermes, stop-hermes,
+hermes-restore, and the optional sync daemon all reuse the cached session
+silently. Cache is invalidated on `bw lock`, vault password change, or
+explicit `stop-hermes.ps1 -LockVault`.
 
-```powershell
-New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.hermes" | Out-Null
-```
+### 5. (No host data dir needed)
+
+The persistent state lives in a Docker **named volume** (`hermes-data`),
+not in `${USERPROFILE}\.hermes`. Compose creates the volume on first
+`up`. If you're migrating from the legacy bind-mount layout, see
+**[Migration from bind-mount](#migration-from-bind-mount)** below before
+running `start-hermes.ps1`.
 
 ### 6. Build the image (first time only)
 
@@ -101,19 +123,19 @@ pwsh "$DEPLOY\scripts\start-hermes.ps1"
 ```
 
 What it does:
-1. Checks Bitwarden vault status, prompts for master password if locked.
-2. Reads `DEEPSEEK_API_KEY` field from the vault item.
-3. Injects into the host shell's env (not into any file).
+1. Unlocks the BW vault (DPAPI cache hit → silent; cache miss → master pw).
+2. Pulls `deepseek_api_key` from the "Hermes Auth State" item.
+3. Injects as `DEEPSEEK_API_KEY` in the launcher's env.
 4. Runs `docker compose up -d` — compose forwards the env into both containers.
-5. Scrubs the host env var on exit. `BW_SESSION` is kept so re-runs in the
-   same shell skip the master-password prompt.
+5. Warns if the `hermes-data` volume has no `auth.json` (pointing to
+   `hermes-restore.ps1` for first-time setup or recovery).
+6. Scrubs the host env var on exit. `BW_SESSION` survives so other
+   scripts in the same shell stay silent.
 
-Custom vault item / field:
+Custom vault item:
 ```powershell
-pwsh "$DEPLOY\scripts\start-hermes.ps1" -Item "My DeepSeek Vault Entry" -FieldName "api_key"
+pwsh "$DEPLOY\scripts\start-hermes.ps1" -BwItem "My Custom Vault Entry"
 ```
-
-The first build takes a while (Debian + Python + Node + ffmpeg).
 
 ### 8. Open the dashboard
 
@@ -130,11 +152,218 @@ On first `hermes setup`, pick provider **DeepSeek** and model
 `deepseek-chat` (V3) or `deepseek-reasoner`. The key is already in the
 container's env so no paste needed.
 
+### 10. (Optional) Add ChatGPT / Claude subscription providers
+
+Hermes can also consume your existing **ChatGPT Plus/Pro** and **Claude
+Pro/Max** subscription quota instead of (or in addition to) per-token API
+billing. One-shot setup:
+
+```powershell
+pwsh "$DEPLOY\scripts\setup-providers.ps1"
+```
+
+What it does:
+1. Runs the OpenAI Codex device-code flow inside the container — opens a URL
+   + 8-char code, you approve in your browser with your ChatGPT account.
+   Refresh token lands in `~/.hermes/auth.json` (persisted volume).
+2. Installs `@anthropic-ai/claude-code` in the container (if missing) and
+   runs `claude setup-token` as the `hermes` user — opens a URL, you log
+   into Claude.ai and paste back a verification code. Refresh token lands
+   in `~/.hermes/.claude/.credentials.json` (persisted volume).
+3. Reports status; both should read `OK` afterwards.
+
+Sub-commands:
+```powershell
+pwsh "$DEPLOY\scripts\setup-providers.ps1" -Status                   # just check, don't auth
+pwsh "$DEPLOY\scripts\setup-providers.ps1" -SkipClaude               # codex only
+pwsh "$DEPLOY\scripts\setup-providers.ps1" -SkipCodex                # claude only
+pwsh "$DEPLOY\scripts\setup-providers.ps1" -Force                    # re-auth even if already logged in
+pwsh "$DEPLOY\scripts\setup-providers.ps1" -ClaudeMode interactive   # force the browser flow even if host has creds
+pwsh "$DEPLOY\scripts\setup-providers.ps1" -ClaudeMode import        # always copy from host (fail if absent)
+```
+
+**Claude login modes (`-ClaudeMode`)**:
+- `auto` (default) — if `$env:USERPROFILE\.claude\.credentials.json` exists on the
+  host (i.e. you already use Claude Code locally), copy it into the Hermes
+  data volume. Otherwise run the interactive `claude auth login --claudeai`.
+- `import` — always copy from the host file. Fastest, but the host's Claude
+  Code and Hermes will then share the same OAuth refresh token; when either
+  client rotates (~30-day cadence) the other's session breaks until you
+  re-run `-ClaudeMode import` to resync.
+- `interactive` — always run the browser flow. Hermes gets its own refresh
+  token, independent of the host's Claude Code.
+- `setup-token` — register an existing `sk-ant-oat01-...` long-lived token
+  (produced by `claude setup-token`) into Hermes' credential pool. Use this
+  when you've already run `claude setup-token` separately and have the
+  token string in hand. Hermes auto-detects the `sk-ant-oat*` prefix and
+  routes via Bearer + Claude Code beta header (subscription billing, not
+  API quota). Stored in `~/.hermes/auth.json` as a pooled credential —
+  independent of any host-side `~/.claude/.credentials.json`.
+
+After setup, pick the subscription model as your Hermes default:
+```powershell
+docker exec -it hermes /opt/hermes/.venv/bin/hermes model
+# Anthropic       → claude-opus-4-7 (or claude-sonnet-4-5 etc.)
+# OpenAI Codex    → gpt-5.5 (or gpt-5.4-mini, gpt-5.3-codex, ...)
+# NOTE: ChatGPT-account Codex does NOT accept gpt-5 / gpt-5-codex / codex-mini.
+#       It only accepts gpt-5.x slugs from hermes_cli/codex_models.py.
+```
+
+### Step 11. (Optional) Point Hermes at your local code
+
+To let the agent actually read and edit your projects, mount your code root
+into the container at `/workspace`. The compose file already declares the
+mount; you just need to ensure the source path is right and that the
+container has been (re)created since the mount was added.
+
+`.env`:
+```dotenv
+# Defaults to ${USERPROFILE}/Documents/Git on Windows if unset.
+HERMES_PROJECTS="C:/Users/<you>/Documents/Git"
+```
+
+Apply (no full rebuild needed — just recreate so the new bind mount is
+applied):
+```powershell
+docker compose -f docker-compose.windows.yml up -d --force-recreate
+docker exec hermes ls /workspace        # should list every repo
+```
+
+Drop into an interactive chat scoped to one project (assumes that project
+has a `CLAUDE.md` / `AGENTS.md` with its conventions):
+
+```powershell
+pwsh "$DEPLOY\scripts\hermes-on.ps1" my-project
+# or one-shot:
+pwsh "$DEPLOY\scripts\hermes-on.ps1" my-project -Query "review the diff on this branch"
+# isolated git worktree (lets you fan out parallel agents on the same repo):
+pwsh "$DEPLOY\scripts\hermes-on.ps1" my-project -Worktree
+# pick a different model:
+pwsh "$DEPLOY\scripts\hermes-on.ps1" my-project -Model gpt-5.5 -Provider openai-codex
+# list mounted projects:
+pwsh "$DEPLOY\scripts\hermes-on.ps1" -List
+```
+
+The wrapper preloads a "production-grade" skill bundle by default
+(`code-review-and-quality`, `test-driven-development`,
+`debugging-and-error-recovery`, `security-and-hardening`,
+`git-workflow-and-versioning`). Override with `-Skills "a,b,c"` or suppress
+entirely with `-SkipSkills`.
+
+**Caveats:**
+- Subscription quotas (e.g. Claude's 5-hour window, Codex's weekly cap) apply
+  exactly as they would inside the first-party CLIs.
+- Anthropic / OpenAI ToS technically scope these tokens to their first-party
+  clients. Hermes presents itself as a compatible client; treat the risk
+  envelope the same as you would using any community CLI on the same token.
+- The token files in `~/.hermes/auth.json` and `~/.hermes/.claude/` are
+  long-lived refresh tokens. They're as sensitive as a logged-in browser
+  session — the existing `~/.hermes` permissions (0700) protect them, but
+  back them up with the same care you'd give a password manager export.
+
 ---
+
+## Migration from bind-mount
+
+Existing installs that use the legacy `${USERPROFILE}/.hermes` bind-mount
+need to move state into the new `hermes-data` named volume before
+restarting. One-shot:
+
+```powershell
+$DEPLOY = "C:\Users\$env:USERNAME\Documents\Git\hermes\deploy\hermes-agent"
+
+# 1. Replace the live compose file with the updated one (the volume
+#    declaration was added in this revision).
+Copy-Item "$DEPLOY\docker-compose.windows.yml" "$env:USERPROFILE\hermes-agent\"
+
+# 2. Migrate (stops containers, copies ~/.hermes into the named volume).
+pwsh "$DEPLOY\scripts\migrate-to-named-volume.ps1"
+
+# 3. Boot via the new launcher.
+pwsh "$DEPLOY\scripts\start-hermes.ps1"
+
+# 4. Push the volume's auth.json to BW so the next-host story is complete.
+pwsh "$DEPLOY\scripts\hermes-restore.ps1" -Push
+
+# 5. Verify everything works for a day or two, then (optional) delete the
+#    legacy bind-mount directory:
+Remove-Item -Recurse -Force "$env:USERPROFILE\.hermes"
+```
+
+## VPS / Mini PC migration (with BW as source of truth)
+
+On the new host:
+
+```bash
+# 1. Install Docker (Linux example)
+curl -fsSL https://get.docker.com | sh
+
+# 2. Install Node + Bitwarden CLI + log into BW
+sudo apt install -y nodejs npm
+npx -y @bitwarden/cli login                       # one-time
+
+# 3. Install PowerShell 7 (the launcher scripts are pwsh-only; Linux's
+#    default `bash` doesn't run them). Microsoft ships an apt repo:
+sudo apt install -y wget apt-transport-https
+source /etc/os-release
+wget -q https://packages.microsoft.com/config/ubuntu/$VERSION_ID/packages-microsoft-prod.deb
+sudo dpkg -i packages-microsoft-prod.deb
+sudo apt update && sudo apt install -y powershell
+
+# 4. Clone this repo (no secrets in it)
+git clone https://github.com/<you>/hermes
+cd hermes/deploy/hermes-agent
+mkdir -p ~/hermes-agent
+cp docker-compose.windows.yml ~/hermes-agent/     # or wherever HermesDir is
+cp .env.template ~/hermes-agent/.env              # edit HERMES_PROJECTS for Linux paths
+
+# 5. Seed the named volume from BW (auth.json + OAuth refresh tokens).
+pwsh ./scripts/hermes-restore.ps1                 # -Pull is the default
+
+# 6. Boot
+pwsh ./scripts/start-hermes.ps1
+```
+
+No `tar` of the old host's data dir. No `scp` of `auth.json`. BW is the
+canonical store; Docker volumes are runtime caches that can be discarded
+and re-seeded any time.
+
+**Linux caveat**: the DPAPI session cache is Windows-only (uses
+`System.Security.Cryptography.ProtectedData`, which on .NET/Linux throws
+PlatformNotSupportedException). On Linux the master-password prompt
+therefore fires once per shell that runs a launcher script.
+
+To reduce prompts within a single shell session, unlock once and export
+to that shell ONLY:
+
+```bash
+# Run interactively; do NOT add to ~/.bashrc or ~/.zshrc — those files
+# are usually 644 (world-readable), and even at 600 the session key
+# would be visible via /proc/<your-shell-pid>/environ to any same-user
+# process for the lifetime of the shell.
+read -s -p "BW master password: " BW_PW; echo
+export BW_PW
+export BW_SESSION=$(npx -y @bitwarden/cli unlock --raw --passwordenv BW_PW)
+unset BW_PW
+```
+
+(`--passwordenv` reads the password from the named env var — no need to
+also pipe it through stdin. The single channel keeps the example
+unambiguous across BW CLI versions.)
+
+For a longer-lived cache the right answer is `pass` or `gnome-keyring`
+integration — a future change can swap a Linux-native KeyringProvider
+into `bw-session.psm1`. PRs welcome.
 
 ## Day-to-day operations
 
 ```powershell
+# Clean stop with auth.json push to BW (preferred over `docker stop`)
+pwsh deploy\hermes-agent\scripts\stop-hermes.ps1
+
+# Force a fresh master-pw prompt next time
+pwsh deploy\hermes-agent\scripts\stop-hermes.ps1 -LockVault
+
 # Status / logs (no key needed)
 docker compose -f docker-compose.windows.yml ps
 docker compose -f docker-compose.windows.yml logs -f gateway
@@ -174,50 +403,29 @@ docker stop hermes hermes-dashboard
 
 ## Backups
 
-Snapshot the host data dir to a timestamped tar.gz:
+The Hermes state lives in the `hermes-data` Docker named volume — NOT on
+the host filesystem. The old `scripts/backup.ps1` (which tar'd
+`~/.hermes`) no longer reflects the live data location and is kept only
+for legacy bind-mount installs.
 
-```powershell
-pwsh .\scripts\backup.ps1
-```
+Today there are two backup paths, with different purposes:
 
-This briefly stops the gateway, archives `~/.hermes`, restarts. Output lands in
-`./backups/hermes-<timestamp>.tar.gz`. Add to Windows Task Scheduler for daily
-runs if you want.
+- **OAuth credentials → Bitwarden vault** (`hermes-restore.ps1 -Push`).
+  This is the only thing you need for a new-host bootstrap. Run it after
+  every meaningful auth event (initial login, manual rotation, post-stop
+  via `stop-hermes.ps1` which calls it for you).
+- **Full volume snapshot → archive file**. Useful for full historical
+  backups of sessions, memories, skills, etc.:
+  ```powershell
+  docker run --rm -v hermes-data:/data -v ${PWD}:/backup alpine `
+      tar -czf /backup/hermes-data-$(Get-Date -Format yyyyMMdd-HHmmss).tar.gz -C /data .
+  ```
+  Restoring: `tar -xzf ...` into a freshly-created volume via the same
+  pattern in reverse. (Not needed for the common new-host story — only
+  if you want every session log to follow you across machines.)
 
----
-
-## Migrating to a VPS or Mini PC
-
-The whole point of this layout. Three steps on the new machine:
-
-1. **Install Docker** (any Linux: `curl -fsSL https://get.docker.com | sh`).
-
-2. **Move the three pieces:**
-   ```bash
-   # On Windows: scp the tar.gz, .env, and the compose file
-   scp backups/hermes-latest.tar.gz user@vps:~
-   scp .env user@vps:~/hermes-deploy/
-   scp docker-compose.windows.yml user@vps:~/hermes-deploy/docker-compose.yml
-
-   # On the VPS: restore data dir
-   mkdir -p ~/.hermes
-   tar -xzf ~/hermes-latest.tar.gz -C ~     # creates ~/.hermes
-
-   # Clone upstream for the build context
-   git clone https://github.com/NousResearch/hermes-agent.git
-   cp ~/hermes-deploy/docker-compose.yml hermes-agent/
-   cp ~/hermes-deploy/.env hermes-agent/
-   ```
-
-3. **On Linux you can re-enable `network_mode: host` for fewer hops.** Either
-   keep the Windows-safe `ports:` mapping (works fine), or apply this diff:
-   ```yaml
-   # remove `ports:` blocks
-   # add to both services:
-   network_mode: host
-   ```
-
-That's it. State, memories, skills, conversation history — all carry over.
+The legacy `scripts/backup.ps1` against `$env:USERPROFILE\.hermes` is
+useful only if you haven't yet run `migrate-to-named-volume.ps1`.
 
 ---
 
