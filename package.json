@@ -25,5 +25,11 @@
     "@types/node": "^24.10.1",
     "tsx": "^4.22.0",
     "typescript": "^6.0.3"
+  },
+  "overrides": {
+    "koa": "^3.2.0",
+    "multer": "^2.1.1",
+    "node-forge": "^1.4.0",
+    "tmp": "^0.2.5"
   }
 }
