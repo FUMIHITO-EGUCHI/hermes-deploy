@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 # provision-bw-vault.ps1 — Bitwarden vault に Hermes 用構造を作成。
 #
 # 構造:
@@ -5,7 +6,7 @@
 #     ├── Item: Hermes / Provider Keys (Secure Note)
 #     │     field: deepseek_api_key   (既存 'DeepSeek API Key' item.login.password を自動 copy)
 #     ├── Item: Hermes / Self-Hosted Auth (Secure Note)
-#     │     field: api_server_key     (CSPRNG 32B -> base64url)
+#     │     field: api_server_key     (CSPRNG 32B -> 64-char lowercase hex)
 #     └── Item: Hermes / OAuth State   (Secure Note)
 #           notes: <auth.json raw JSON>  (base64 化せず raw 格納)
 #
@@ -17,6 +18,9 @@
 #   * bw serve の起動・unlock・テアダウンは bw-session.psm1 の
 #     Start-BwServe / Stop-BwServe / Invoke-BwServeApi / Get-BwServeItem を
 #     使う (start-hermes.ps1 / hermes-restore.ps1 と同じヘルパ。重複削減)。
+#   * `RandomNumberGenerator.Fill` は .NET 5+ 限定なので PS7 を必須化。
+#     PS 5.1 では `MethodNotFoundException` になるのでヘッダの #Requires で
+#     早期 fail させる。
 #
 # 実行 (TTY 必須):
 #   pwsh -NoProfile -File scripts/provision-bw-vault.ps1
