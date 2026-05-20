@@ -44,6 +44,17 @@ $ErrorActionPreference = 'Stop'
 # Hoist the assembly import to module load so the cryptography path is
 # always primed (and we don't pay Add-Type cost on every call).
 Add-Type -AssemblyName System.Security
+# PS 7 (Core/.NET 5+) は `System.Security.AccessControl.FileSystemAccessRule`
+# / `FileSystemRights` 等を `System.IO.FileSystem.AccessControl` アセンブリへ
+# 分離しており、暗黙ロードされない。明示的に Add-Type しないと
+# New-RestrictedFile / Save-CachedSession の ACL 構築が
+# `Unable to find type [System.IO.FileSystemRights]` で死ぬ。
+# WinPS 5.1 では `System.dll` 経由で同型が見えるため Add-Type は no-op。
+try { Add-Type -AssemblyName System.IO.FileSystem.AccessControl -ErrorAction Stop } catch {
+    # Fallback: 古い .NET / Mono など、当該アセンブリが存在しない環境。
+    # ACL 強化は諦め、DPAPI 暗号化 + 親ディレクトリ既定権限に依存。
+    Write-Verbose "System.IO.FileSystem.AccessControl unavailable: $_"
+}
 
 $script:CacheDir  = Join-Path $env:USERPROFILE '.hermes-cache'
 $script:CachePath = Join-Path $script:CacheDir 'bw_session.dpapi'
@@ -52,10 +63,14 @@ $script:CachePath = Join-Path $script:CacheDir 'bw_session.dpapi'
 # install is present the shim is ~300ms faster per call than `npx -y`
 # (which re-resolves the package each time). Falls back to npx so a fresh
 # clone still works without a global install step.
-$script:BwCmd = if (Get-Command bw -ErrorAction SilentlyContinue) {
-    @('bw')
+# `if` ブロックの戻り値は PowerShell pipeline に流された時点で配列が
+# 要素 1 個なら scalar に unwrap される (有名な落とし穴)。`@(...)` も
+# `[string[]]` キャストも、`if` の return path を通ると効果が消える。
+# 直接代入する形に書き換えて、その後 `[string[]]` で型を固定する。
+if (Get-Command bw -ErrorAction SilentlyContinue) {
+    [string[]]$script:BwCmd = ,'bw'
 } else {
-    @('npx', '-y', '@bitwarden/cli')
+    [string[]]$script:BwCmd = 'npx', '-y', '@bitwarden/cli'
 }
 
 function script:Set-ProcEnv {
@@ -88,10 +103,15 @@ function script:Invoke-Bw {
         # the master password during transient outages.
         $stderrTmp = [System.IO.Path]::GetTempFileName()
         try {
+            # `$script:BwCmd` は `[string[]]` で配列性を保証してあるので
+            # 単純な `[0]` / `Select-Object -Skip 1` で扱える。`-Skip 1` は
+            # 長さ 1 入力で空配列を返すため [1..0] 逆順 slice の罠は無い。
+            $bwExe = $script:BwCmd[0]
+            $bwPre = $script:BwCmd | Select-Object -Skip 1
             if ($StdinInput) {
-                $stdoutOut = $StdinInput | & $script:BwCmd[0] $script:BwCmd[1..($script:BwCmd.Length - 1)] @BwArgs 2>$stderrTmp
+                $stdoutOut = $StdinInput | & $bwExe @bwPre @BwArgs 2>$stderrTmp
             } else {
-                $stdoutOut = & $script:BwCmd[0] $script:BwCmd[1..($script:BwCmd.Length - 1)] @BwArgs 2>$stderrTmp
+                $stdoutOut = & $bwExe @bwPre @BwArgs 2>$stderrTmp
             }
             $exit = $LASTEXITCODE
             $stderrOut = (Get-Content $stderrTmp -Raw -ErrorAction SilentlyContinue)
@@ -151,10 +171,16 @@ function script:New-RestrictedFile {
     try {
         if ($extType) {
             # Atomic path — .NET Core / PS 7+
+            # NOTE: `FileSystemRights` は `System.Security.AccessControl`
+            # 名前空間。`System.IO.FileSystemRights` という型は存在しない
+            # (PS の暗黙 namespace lookup でも引っかからない) ので必ず
+            # 完全修飾。元コードは ``[System.IO.FileSystemRights]::Write``
+            # と書いていたため PS7 で atomic create path に入った瞬間に
+            # `Unable to find type` で落ちていた。
             $stream = $extType::Create(
                 [System.IO.FileInfo]::new($Path),
                 [System.IO.FileMode]::CreateNew,
-                [System.IO.FileSystemRights]::Write,
+                [System.Security.AccessControl.FileSystemRights]::Write,
                 [System.IO.FileShare]::None,
                 4096,
                 [System.IO.FileOptions]::None,
@@ -284,7 +310,9 @@ function Get-BwSession {
     # Interactive unlock — read directly with the user at the TTY. Output
     # is the raw session key on stdout; do NOT capture stderr into the
     # variable here or the master-password prompt is invisible.
-    $session = & $script:BwCmd[0] $script:BwCmd[1..($script:BwCmd.Length - 1)] unlock --raw
+    $bwExe = $script:BwCmd[0]
+    $bwPre = $script:BwCmd | Select-Object -Skip 1
+    $session = & $bwExe @bwPre unlock --raw
     if (-not $session -or $LASTEXITCODE -ne 0) {
         throw "bw unlock failed"
     }
@@ -354,4 +382,175 @@ function Invoke-BwInternal {
     return script:Invoke-Bw -BwArgs $BwArgs -StdinInput $StdinInput -ExtraEnv $ExtraEnv
 }
 
-Export-ModuleMember -Function Get-BwSession, Clear-BwSession, Get-BwField, Invoke-BwInternal
+# -----------------------------------------------------------------------------
+# bw serve backend
+#
+# bw CLI 2026.x で `bw --session <key>` / `BW_SESSION` env が無視される既知
+# バグ (bitwarden/clients#12270) を踏むため、subprocess + session 渡しの経路は
+# もう機能しない。代替として bw serve (localhost REST API) を script lifecycle
+# 内で start/stop する形に統合する。
+#
+# 利用パターン:
+#   $s = Start-BwServe
+#   try {
+#     $deepseek = Get-BwServeField -Session $s -Item 'X' -FieldName 'k'
+#     ...
+#   } finally {
+#     Stop-BwServe -Session $s
+#   }
+# -----------------------------------------------------------------------------
+
+function Start-BwServe {
+    <#
+    .SYNOPSIS
+        Boot bw serve in a background job and unlock it via POST /unlock.
+        Returns a session object: { Port, BaseUri, Job }.
+    .PARAMETER Port
+        Port to bind (default 8087). If already in use, throws.
+    #>
+    [CmdletBinding()]
+    param([int]$Port = 8087, [int]$StartupTimeoutSec = 30)
+
+    $base = "http://localhost:$Port"
+
+    # ポート衝突チェック (既存 bw serve があれば早期 fail)。
+    # 直前のバージョンは `throw` を try ブロック内で出していたため、続く
+    # catch{} (connection refused を握りつぶす意図) に飲まれて衝突を
+    # 検出できなかった。フラグで try を抜けてから throw する。
+    $alreadyRunning = $false
+    try {
+        $existing = Invoke-RestMethod -Uri "$base/status" -Method Get -TimeoutSec 2 -ErrorAction Stop
+        if ($existing.success) { $alreadyRunning = $true }
+    } catch {
+        # connection refused は期待動作 (これから起動する)
+    }
+    if ($alreadyRunning) {
+        throw "Port $Port is already serving a bw instance. Stop it or pass -Port <other>."
+    }
+
+    $job = Start-Job -ScriptBlock {
+        param($P) & bw serve --port $P --hostname localhost
+    } -ArgumentList $Port
+
+    # readiness wait
+    $deadline = (Get-Date).AddSeconds($StartupTimeoutSec)
+    $ready = $false
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $r = Invoke-RestMethod -Uri "$base/status" -Method Get -TimeoutSec 2 -ErrorAction Stop
+            if ($r.success) { $ready = $true; break }
+        } catch {}
+        Start-Sleep -Milliseconds 500
+    }
+    if (-not $ready) {
+        Stop-Job $job -ErrorAction SilentlyContinue
+        Remove-Job $job -Force -ErrorAction SilentlyContinue
+        throw "bw serve did not become ready within $StartupTimeoutSec seconds"
+    }
+
+    # POST /unlock — master pw を SecureString 経由で受け取り、pinned bytes
+    # として渡す。$pwPlain は ZeroFreeBSTR で消去。
+    Write-Host "Unlocking BW vault (REST)..." -ForegroundColor Cyan
+    $securePw = Read-Host "Master password" -AsSecureString
+    $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePw)
+    try {
+        $pwPlain = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+        $body = @{ password = $pwPlain } | ConvertTo-Json -Compress
+        $resp = Invoke-RestMethod -Uri "$base/unlock" -Method Post -Body $body -ContentType 'application/json' -ErrorAction Stop
+        if (-not $resp.success) {
+            throw "bw /unlock failed: $($resp.message)"
+        }
+    } catch {
+        Stop-Job $job -ErrorAction SilentlyContinue
+        Remove-Job $job -Force -ErrorAction SilentlyContinue
+        throw
+    } finally {
+        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        $pwPlain = $null
+        $securePw.Dispose()
+    }
+
+    # sync once
+    Invoke-RestMethod -Uri "$base/sync" -Method Post -ErrorAction SilentlyContinue | Out-Null
+
+    return [pscustomobject]@{
+        Port    = $Port
+        BaseUri = $base
+        Job     = $job
+    }
+}
+
+function Stop-BwServe {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][pscustomobject]$Session)
+    try {
+        Invoke-RestMethod -Uri "$($Session.BaseUri)/lock" -Method Post -TimeoutSec 5 -ErrorAction SilentlyContinue | Out-Null
+    } catch {}
+    if ($Session.Job) {
+        Stop-Job $Session.Job -ErrorAction SilentlyContinue | Out-Null
+        Remove-Job $Session.Job -Force -ErrorAction SilentlyContinue | Out-Null
+    }
+}
+
+function Invoke-BwServeApi {
+    # serve の REST response wrapper: { success, data, message }。
+    # success=false で throw、list endpoint は data の入れ子 { object, data }
+    # を 1 段剥がす責務は呼び出し側 (data 構造が item か list か文脈依存)。
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Session,
+        [Parameter(Mandatory)][ValidateSet('GET','POST','PUT','DELETE')][string]$Method,
+        [Parameter(Mandatory)][string]$Path,
+        [object]$Body
+    )
+    $params = @{
+        Uri         = "$($Session.BaseUri)$Path"
+        Method      = $Method
+        ErrorAction = 'Stop'
+    }
+    if ($PSBoundParameters.ContainsKey('Body')) {
+        $params['Body']        = ($Body | ConvertTo-Json -Depth 20 -Compress)
+        $params['ContentType'] = 'application/json'
+    }
+    $res = Invoke-RestMethod @params
+    if (-not $res.success) {
+        throw "bw API $Method $Path failed: $($res.message)"
+    }
+    return $res.data
+}
+
+function Get-BwServeItem {
+    # item 名で完全一致検索 (全 list filter)。`/list/object/items?search=`
+    # 経由は環境によって hit しないため使わない。
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Session,
+        [Parameter(Mandatory)][string]$Name
+    )
+    $list = (Invoke-BwServeApi -Session $Session -Method GET -Path '/list/object/items').data
+    $item = $list | Where-Object { $_.name -eq $Name } | Select-Object -First 1
+    if (-not $item) {
+        throw "BW item '$Name' not found"
+    }
+    return $item
+}
+
+function Get-BwServeField {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][pscustomobject]$Session,
+        [Parameter(Mandatory)][string]$Item,
+        [Parameter(Mandatory)][string]$FieldName
+    )
+    $obj = Get-BwServeItem -Session $Session -Name $Item
+    $field = $obj.fields | Where-Object { $_.name -eq $FieldName } | Select-Object -First 1
+    if (-not $field) {
+        $available = ($obj.fields | ForEach-Object { $_.name }) -join ', '
+        throw "Field '$FieldName' not found in '$Item'. Available: [$available]"
+    }
+    return $field.value
+}
+
+Export-ModuleMember -Function `
+    Get-BwSession, Clear-BwSession, Get-BwField, Invoke-BwInternal, `
+    Start-BwServe, Stop-BwServe, Invoke-BwServeApi, Get-BwServeItem, Get-BwServeField
