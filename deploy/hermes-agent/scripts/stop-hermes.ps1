@@ -90,10 +90,12 @@ if ($SkipPush) {
     }
 }
 
-# 3. Optionally lock the vault. By default we leave the DPAPI cache in
-#    place so other terminals/scripts keep working without re-prompting.
+# 3. Optionally lock the vault. By default we leave the vault unlocked so
+#    other terminals/scripts can use it without re-prompting. (The DPAPI
+#    cache that used to back the subprocess path is gone — `bw serve` keeps
+#    its unlock state in-process, so locking only affects the global CLI.)
 if ($LockVault) {
-    Write-Host "Clearing DPAPI session cache and locking the BW vault." -ForegroundColor Cyan
+    Write-Host "Locking the BW vault." -ForegroundColor Cyan
     Clear-BwSession
 }
 
