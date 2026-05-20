@@ -99,25 +99,14 @@ function script:Invoke-Bw {
             Remove-Item $stderrTmp -Force -ErrorAction SilentlyContinue
         }
 
-        # Scrub session-shaped material from captured stderr before returning.
-        # Two passes:
-        #   1. Exact match on the known session (if caller passed it via
-        #      ExtraEnv) — catches the common case.
-        #   2. Regex pass for "looks like a base64 secret" — catches
-        #      debug-truncated session prefixes (`session: abcd...`),
-        #      other tokens BW might log, and any future leak vector we
-        #      haven't thought of. Over-redacts long hashes; that's
-        #      acceptable for an error path.
-        if ($stderrOut) {
-            if ($ExtraEnv -and $ExtraEnv.BW_SESSION) {
-                $stderrOut = $stderrOut.Replace($ExtraEnv.BW_SESSION, '[REDACTED-SESSION]')
-            }
-            # Match BOTH standard base64 (`+/`) AND base64url (`_-`).
-            # BW CLI currently only emits the standard form, but JWT
-            # fragments / PKCE verifiers / OIDC artifacts in future
-            # debug output use base64url — widening the class costs
-            # nothing today and prevents a future leak vector.
-            $stderrOut = [Regex]::Replace($stderrOut, '[A-Za-z0-9+/_\-]{40,}={0,2}', '[REDACTED-B64]')
+        # Scrub the known session string from captured stderr. Earlier this
+        # had a second regex pass against "any 40+ char base64-ish blob",
+        # but that over-redacts SHA hashes, JWT fragments, item IDs, and
+        # other diagnostic content we'd want to see when debugging. The
+        # literal-match pass below is the only place a real leak originates
+        # from — BW CLI doesn't print the session anywhere else.
+        if ($stderrOut -and $ExtraEnv -and $ExtraEnv.BW_SESSION) {
+            $stderrOut = $stderrOut.Replace($ExtraEnv.BW_SESSION, '[REDACTED-SESSION]')
         }
 
         return [PSCustomObject]@{
