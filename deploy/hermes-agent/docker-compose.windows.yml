@@ -38,12 +38,6 @@ services:
     restart: unless-stopped
     volumes:
       - "hermes-data:/opt/data"
-      # Projects workspace — the directory tree that holds every repo you
-      # want Hermes to operate on. Mounted read-write so the agent can edit
-      # source files. Each subdirectory becomes /workspace/<project> inside
-      # the container; pick the one you want with `hermes-on.ps1 <name>` or
-      # `docker exec -w /workspace/<name> ...`.
-      - "${HERMES_PROJECTS:-${USERPROFILE}/Documents/Git}:/workspace:rw"
     environment:
       - HERMES_UID=10000
       - HERMES_GID=10000
