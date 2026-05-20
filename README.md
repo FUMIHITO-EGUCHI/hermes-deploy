@@ -1,49 +1,49 @@
 # hermes-deploy
 
-[NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) を **Windows + Docker** で自己ホストするためのデプロイラッパー。将来的に Linux / ARM (Mini PC / VPS) へ持ち運べるよう、設定とシークレットを Bitwarden に集約する設計。
+[NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) を **Windows + Docker** で自己ホストするための薄いラッパー。upstream の意図に沿った「Hermes が自分の状態を自分で管理する」設計に倒し、host 側のスクリプトや秘密ストアを最小化。
 
-> 主役は `deploy/hermes-agent/` 配下。詳細は **[`deploy/hermes-agent/README.md`](deploy/hermes-agent/README.md)** に集約してある。本ファイルはリポジトリ全体の入り口。
+> 主役は `deploy/hermes-agent/` 配下。詳細は **[`deploy/hermes-agent/README.md`](deploy/hermes-agent/README.md)**。
 
 ---
 
 ## 何ができるか
 
-- **Bitwarden 経由のシークレット管理** — API キー・OAuth トークン・`auth.json` をすべて BW vault に格納。Windows DPAPI でセッションキャッシュし、マスターパスワード入力は 1 日 1 回程度。
-- **双方向同期** — BW vault ↔ Docker named volume (`hermes-data`) を `hermes-restore.ps1 -Pull / -Push` で同期。
-- **コンテナ移行** — bind-mount から named volume へ atomic に移行する `migrate-to-named-volume.ps1` (staging dir + completion marker)。
-- **OAuth プロビジョニング** — Codex (device-code) / Claude PKCE / `sk-ant-oat01-*` setup-token を `setup-providers.ps1` で一括セットアップ。
-- **スコープ付きチャット起動** — `hermes-on.ps1 <project>` で `/workspace/<project>` を cwd にした Hermes Agent チャットを開く。`AGENTS.md` / `CLAUDE.md` 自動ロード。
-- **AutoRoute モード** — `-AutoRoute` フラグで DeepSeek-V4 (flash) を親エージェントに据え、`delegate_task` で Opus 4.7 / GPT-5.5 に重い判断だけ委譲。プロンプトキャッシュでコスト最適化。
-- **ライフサイクル** — `start-hermes.ps1` (起動 + シークレット注入) / `stop-hermes.ps1` (停止 + BW 最終 push)。
+- **常駐 Hermes container**: gateway + dashboard 2 サービス、`restart: unless-stopped`
+- **多経路アクセス**: OpenAI 互換 API (`:8642/v1`)、Hermes 内蔵 dashboard (`:9119`)、CLI (`docker exec`)、Discord/Telegram/Slack bot (gateway)
+- **Hermes 内蔵機能で完結**: provider 認証 (`hermes login`)、backup (`hermes backup`)、messenger 設定 (`hermes gateway setup`)、cron / kanban / skills
+- **secret は container 内**: `auth.json` が named volume に閉じ、host filesystem には鍵が一切残らない
 
 ---
 
 ## クイックスタート
 
-前提: Docker Desktop / PowerShell 7+ / Bitwarden CLI (グローバル or npx)。
-
 ```powershell
-# 1) リポジトリ取得
-git clone https://github.com/FUMIHITO-EGUCHI/hermes-deploy.git
-cd hermes-deploy
+# 1) upstream hermes-agent を build context として clone
+cd C:\Users\$env:USERNAME
+git clone https://github.com/NousResearch/hermes-agent.git
+cd hermes-agent
 
-# 2) .env 作成 (秘密値はここに書かない。BW vault から起動時に注入される)
-cp deploy/hermes-agent/.env.template deploy/hermes-agent/.env
-# HERMES_DATA / HERMES_PROJECTS だけ自分の環境に合わせる
+# 2) 本リポの compose を持ち込む
+$DEPLOY = "C:\Users\$env:USERNAME\Documents\Git\hermes\deploy\hermes-agent"
+Copy-Item "$DEPLOY\docker-compose.windows.yml" .
 
-# 3) 初回 OAuth セットアップ (Bitwarden → vault に書き込み + auth.json を named volume へ展開)
-pwsh deploy/hermes-agent/scripts/setup-providers.ps1
+# 3) build + up
+docker compose -f docker-compose.windows.yml build
+docker compose -f docker-compose.windows.yml up -d
 
-# 4) 起動
-pwsh deploy/hermes-agent/scripts/start-hermes.ps1
+# 4) 初回設定 (対話式、container 内で完結)
+docker exec -it hermes hermes setup
+docker exec -it hermes hermes login deepseek   # or claude / codex
+docker exec -it hermes hermes gateway setup    # Discord 等を有効化したい時
 
-# 5) プロジェクトを指定してチャット (常用)
-pwsh deploy/hermes-agent/scripts/hermes-on.ps1 <project>
-# DeepSeek-V4 親 + Opus / GPT-5.5 委譲モード:
-pwsh deploy/hermes-agent/scripts/hermes-on.ps1 <project> -AutoRoute
+# 5) 使う
+docker exec -it hermes hermes chat             # terminal chat
+# http://127.0.0.1:9119                         # 内蔵 dashboard
+# http://127.0.0.1:8642/v1                      # OpenAI 互換 API (hermes-desktop 等)
+# Discord/Telegram bot — gateway 設定後は messenger から
 ```
 
-詳細手順・各オプション・移行ガイドは [`deploy/hermes-agent/README.md`](deploy/hermes-agent/README.md)。
+詳細は [`deploy/hermes-agent/README.md`](deploy/hermes-agent/README.md)。
 
 ---
 
@@ -51,32 +51,20 @@ pwsh deploy/hermes-agent/scripts/hermes-on.ps1 <project> -AutoRoute
 
 | パス | 役割 |
 |---|---|
-| `deploy/hermes-agent/` | 本リポの主役。compose ファイル + PowerShell スクリプト群 + `auto-route-deepseek` スキル |
-| `deploy/hermes-agent/scripts/bw-session.psm1` | Bitwarden CLI ラッパー (DPAPI セッションキャッシュ + stderr base64 redaction) |
-| `deploy/hermes-agent/scripts/hermes-on.ps1` | スコープ付きチャット起動 (`-AutoRoute` モード対応) |
-| `deploy/hermes-agent/scripts/hermes-restore.ps1` | BW vault ↔ named volume の双方向同期 |
-| `deploy/hermes-agent/scripts/migrate-to-named-volume.ps1` | bind-mount → named volume の atomic 移行 |
-| `deploy/hermes-agent/scripts/setup-providers.ps1` | Codex / Claude OAuth プロビジョニング |
-| `deploy/hermes-agent/scripts/start-hermes.ps1` / `stop-hermes.ps1` | ライフサイクル |
-| `deploy/hermes-agent/skills/auto-route-deepseek/SKILL.md` | DeepSeek 親エージェント用ルーティング誘導スキル |
-| `src/` | TypeScript コア (cost 計算、prompts 構築、Bitwarden 補助、DeepSeek プロバイダ) |
-| `test/` | TypeScript コアのテスト |
-| `docs/` | ADR / handoff ガイド / セキュリティチェックリスト (テンプレート由来、運用しながら更新中) |
-| `.github/` | Issue テンプレ / ラベル / dependabot / セキュリティ CI / Claude AI レビュー (テンプレート由来) |
+| `deploy/hermes-agent/docker-compose.windows.yml` | Windows-safe compose (127.0.0.1 only ports、named volume) |
+| `deploy/hermes-agent/README.md` | デプロイ・運用ドキュメント |
+| `docs/` | ADR / handoff ガイド (テンプレート由来、運用しながら更新) |
+| `.github/` | Issue テンプレ / ラベル / dependabot / セキュリティ CI / Claude AI レビュー |
 
 ---
 
 ## セキュリティ姿勢
 
-[セキュリティ監査](https://github.com/FUMIHITO-EGUCHI/hermes-deploy/pull/2) 済 (Critical / High 0 件)。主要設計:
-
-- **シークレットは argv に乗せない**: BW_SESSION や OAuth トークンは `Invoke-BwInternal` の `ExtraEnv` 経由でプロセス環境にのみ渡し、終了時に `[Environment]::SetEnvironmentVariable($null, 'Process')` で物理削除。WMI / Process Explorer から見えない。
-- **stderr 2 パスレダクション**: BW CLI の stderr を「セッション完全一致 → base64 正規表現」の 2 段で `[REDACTED-*]` に置換してからログ出力。
-- **平文をホスト FS に置かない**: `auth.json` の復号バイト列は alpine コンテナの stdin 経由で named volume に直接書き込み。ホストのファイルシステムには一切触れない。
-- **JSON バリデーション**: BW push 時も pull 時も `providers` キーの存在をチェック。corrupted vault / corrupted volume の双方向防御。
-- **named volume**: bind-mount から `hermes-data` 名前付きボリュームへ移行済。Windows ホストの `CodexSandboxUsers` ACL 経由でのトークン露出を排除。
-- **依存ピン**: `package.json` の `overrides` で transitive (koa / multer / node-forge / tmp) を最新版に固定。`npm audit` 0 件。
-- **CI**: `.github/workflows/security.yml` で gitleaks / Trivy / shellcheck / semgrep を SHA pin 並列実行。
+- **port は loopback only**: `127.0.0.1:8642` (API) / `127.0.0.1:9119` (dashboard)。LAN 不到達
+- **secret は container 内**: `auth.json` を named volume に閉じる。host filesystem 経由のトークン露出を排除
+- **`--insecure` の使用**: gateway / dashboard は container 内 `0.0.0.0` bind が必須 (Docker port-mapping の制約)。host 側 publish が loopback only なので exposure は限定
+- **依存ピン**: `package.json` の `overrides` で transitive (koa / multer / node-forge / tmp) を固定。`npm audit` 0 件
+- **CI**: `.github/workflows/security.yml` で gitleaks / Trivy / shellcheck / semgrep を SHA pin 並列実行
 
 ---
 
@@ -90,8 +78,6 @@ pwsh deploy/hermes-agent/scripts/hermes-on.ps1 <project> -AutoRoute
 - **`.github/labels.yml`** — `status:` / `model:` / `owner:` / `priority:` / `type:` / `area:` の 6 軸ラベル
 - **`scripts/commit-msg`** — `#<issue>` または `[skip-issue]` を commit message に強制
 - **`docs/decisions/`** — ADR (Template strategy / Issue SoT / Human acceptance + Learning loop)
-
-運用詳細は [`docs/handoff/README.md`](docs/handoff/README.md) と [`docs/handoff/ai-execution.md`](docs/handoff/ai-execution.md)。
 
 ---
 
