@@ -63,7 +63,6 @@ docker exec -it hermes hermes chat             # terminal chat
 - **port は loopback only**: `127.0.0.1:8642` (API) / `127.0.0.1:9119` (dashboard)。LAN 不到達
 - **secret は container 内**: `auth.json` を named volume に閉じる。host filesystem 経由のトークン露出を排除
 - **`--insecure` の使用**: gateway / dashboard は container 内 `0.0.0.0` bind が必須 (Docker port-mapping の制約)。host 側 publish が loopback only なので exposure は限定
-- **依存ピン**: `package.json` の `overrides` で transitive (koa / multer / node-forge / tmp) を固定。`npm audit` 0 件
 - **CI**: `.github/workflows/security.yml` で gitleaks / Trivy / shellcheck / semgrep を SHA pin 並列実行
 
 ---

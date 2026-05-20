@@ -30,7 +30,7 @@ TODO: 何を達成するためのプロジェクトか。3〜6 行で。
 - 実装は小さな単位に分け、曖昧なことは推測で埋め切らず未確定事項として残す
 - feature branch 前提で作業し、開始前に `git status` と `git branch --show-current` を確認する
 - `git push` はユーザーから明示的な指示がある場合にのみ行う
-- 実装変更時は少なくとも `npm run typecheck`、`npm run build`、影響した処理の動作確認を行う
+- 変更時は対象に応じた手動確認を行う (compose の構文確認、script の dry-run、コンテナ再起動など)
 
 ## Shell Encoding Rules (Windows)
 

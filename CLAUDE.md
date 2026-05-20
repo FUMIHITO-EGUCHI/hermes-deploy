@@ -8,23 +8,20 @@
 
 ## 技術スタック
 
-<!-- @stack:replace -->
-- 言語/ランタイム: TODO
-- 主要ライブラリ: TODO
-- ビルドツール: TODO
-<!-- @stack:end -->
+- 構成物: `docker-compose.windows.yml` (Hermes Agent コンテナ起動定義) と `scripts/backup.ps1` (Hermes 内蔵 `hermes backup` の Windows Task Scheduler 用ラッパ)
+- 実行環境: Windows 11 + Docker Desktop (WSL2 backend)、PowerShell 7
+- 言語ランタイム不要: アプリ本体は upstream の Hermes Agent (Python) が container 内で完結。本リポは設定とラッパだけを管理
 
 ## コマンド
 
-<!-- @stack:replace -->
-| コマンド | 用途 |
-|---|---|
-| `npm run dev` | 開発サーバー |
-| `npm run build` | ビルド |
-| `npm run typecheck` | 型チェック |
-<!-- @stack:end -->
+このリポ自体にビルド対象はない。動作確認は以下:
 
-完了報告前は `npm run typecheck` と `npm run build`、必要な手動確認を行う。
+| 用途 | コマンド |
+|---|---|
+| compose 設定検証 | `docker compose -f deploy/hermes-agent/docker-compose.windows.yml config` |
+| backup スクリプト dry-run | `pwsh -NoProfile -File deploy/hermes-agent/scripts/backup.ps1 -OutDir ./tmp` |
+
+完了報告前は変更箇所の手動確認 (compose ならコンテナ再起動で立ち上がるか、backup なら zip が生成されるか) を行う。
 
 ## タスク管理（AI handoff）
 
@@ -42,13 +39,13 @@
 
 ## ディレクトリ構造
 
-<!-- @stack:replace -->
 | パス | 役割 |
 |---|---|
-| `src/` | アプリ本体 |
+| `deploy/hermes-agent/docker-compose.windows.yml` | Hermes Agent コンテナ定義 (Windows + Docker Desktop) |
+| `deploy/hermes-agent/scripts/backup.ps1` | `hermes backup` の Task Scheduler 用ラッパ |
+| `deploy/hermes-agent/README.md` | デプロイ・運用手順 |
 | `docs/handoff/` | AI handoff（Issue ベース）の運用ガイド |
 | `docs/decisions/` | ADR |
-<!-- @stack:end -->
 
 ## 行動原則
 
