@@ -156,24 +156,40 @@ docker start hermes hermes-dashboard
 
 ## Backups
 
-Hermes ships a built-in backup command that zips `/opt/data` into a
-portable archive:
+Hermes ships a built-in `hermes backup` command that zips the entire
+`/opt/data` (config, skills, sessions, kanban, cron, auth.json) into a
+portable archive. The repo includes a thin wrapper, `scripts/backup.ps1`,
+that runs it inside the container, copies the zip out to a host
+directory, and rotates old backups.
 
+One-shot:
 ```powershell
-# Inside container — writes to /opt/data/backup.zip
-docker exec hermes hermes backup
-
-# Copy out to host
-docker cp hermes:/opt/data/backup.zip ./hermes-backup-$(Get-Date -Format yyyyMMdd).zip
+pwsh -NoProfile -File deploy\hermes-agent\scripts\backup.ps1
+# → writes to %USERPROFILE%\hermes-backups\hermes-<timestamp>.zip
+# → keeps the 8 most recent by default
 ```
+
+Custom path / retention:
+```powershell
+pwsh -NoProfile -File deploy\hermes-agent\scripts\backup.ps1 `
+    -OutDir D:\hermes-backups -KeepLast 12
+```
+
+Automate via Windows Task Scheduler:
+
+1. **Task Scheduler** → **Create Basic Task** → name `Hermes Weekly Backup`
+2. **Trigger**: Weekly, pick a low-activity time
+3. **Action**: Start a program
+   - Program: `pwsh.exe`
+   - Arguments: `-NoProfile -File "C:\Users\<you>\Documents\Git\hermes\deploy\hermes-agent\scripts\backup.ps1"`
+4. **Conditions**: leave "Start only if computer is on AC power" OFF (desktop has no battery)
+5. **Settings**: turn ON "Run task as soon as possible after a scheduled start is missed" (covers reboots)
 
 Restore on a fresh host:
 ```powershell
-docker cp ./hermes-backup-YYYYMMDD.zip hermes:/opt/data/restore.zip
-docker exec -it hermes hermes import /opt/data/restore.zip
+docker cp ./hermes-YYYYMMDD-HHmmss.zip hermes:/opt/data/restore.zip
+docker exec -it hermes /opt/hermes/.venv/bin/hermes import /opt/data/restore.zip
 ```
-
-Run this on a schedule via Windows Task Scheduler or `hermes cron`.
 
 ---
 
