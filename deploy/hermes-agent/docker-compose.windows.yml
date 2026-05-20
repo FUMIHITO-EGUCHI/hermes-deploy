@@ -2,11 +2,20 @@
 #
 # Differences vs upstream docker-compose.yml:
 #   - network_mode: host removed (not supported on Docker Desktop for Windows).
-#   - Explicit ports: dashboard 9119 bound to 127.0.0.1 only.
+#   - Explicit ports: dashboard 9119 + API server 8642, both bound to
+#     127.0.0.1 only.
 #   - State volume is a named Docker volume (`hermes-data`), NOT a host
 #     bind-mount. Tokens in /opt/data/auth.json are no longer readable from
-#     the host filesystem. Migration / portability now goes through the BW
-#     vault (scripts/hermes-restore.ps1), not tar of ~/.hermes.
+#     the host filesystem. Migration / portability goes through the BW
+#     vault (scripts/hermes-restore.ps1) or a tarball
+#     (scripts/backup.ps1, which uses an alpine sidecar — see its header).
+#
+# About the hermes-data volume (referenced from both services below):
+#   Moved off the host filesystem so OAuth refresh tokens in auth.json are
+#   no longer readable by user-level processes (Codex Sandbox group, sync
+#   tools, malware running as the user, etc.). The volume lives in Docker's
+#   storage area (Windows: WSL2 VM ext4; Linux: /var/lib/docker/volumes/)
+#   and is reachable only via the docker socket.
 #
 # Place this file inside the cloned hermes-agent repo (build context = `.`),
 # or run it with `docker compose -f /abs/path/to/docker-compose.windows.yml
@@ -28,17 +37,6 @@ services:
     container_name: hermes
     restart: unless-stopped
     volumes:
-      # Named volume (was bind-mount to ${USERPROFILE}/.hermes). Moved off
-      # the host filesystem so OAuth refresh tokens in auth.json are no
-      # longer readable by user-level processes (Codex Sandbox group, sync
-      # tools, malware running as the user, etc.). The volume lives in
-      # Docker's storage area (Windows: C:\ProgramData\Docker\volumes) and
-      # is reachable only via the docker socket.
-      #
-      # Migration from the old bind-mount layout is one-shot via
-      # scripts/migrate-to-named-volume.ps1. Backups now go through the
-      # docker socket (see scripts/backup.ps1). VPS / Mini PC migration
-      # uses the BW vault as the source of truth (hermes-restore.ps1).
       - "hermes-data:/opt/data"
       # Projects workspace — the directory tree that holds every repo you
       # want Hermes to operate on. Mounted read-write so the agent can edit
@@ -60,11 +58,12 @@ services:
       # OpenAI-compatible API server (`gateway run` が内包する FastAPI server)。
       # hermes-desktop / OpenWebUI / 任意の OpenAI-compat クライアントから
       # http://127.0.0.1:8642/v1 で接続する用途。
-      # - HOST=0.0.0.0 は container 内部の bind。host 側 publish は
-      #   下記 `ports:` の `127.0.0.1:8642:8642` で loopback only に絞る。
-      # - KEY は API_SERVER_HOST が非ループバックの時に Hermes 本体が
-      #   必須化する (`gateway/platforms/api_server.py`)。BW vault に
-      #   `api_server_key` フィールドで保管し、start-hermes.ps1 が注入する。
+      # - HOST=0.0.0.0 は container 内部の bind。host 側 publish は下記
+      #   `ports:` で 127.0.0.1:8642 に絞る。
+      # - KEY は API_SERVER_HOST が非ループバックの時に Hermes 本体が必須化
+      #   (gateway/platforms/api_server.py)。BW vault の
+      #   'Hermes / Self-Hosted Auth' / api_server_key に保管し、
+      #   start-hermes.ps1 が起動時に注入する。
       - API_SERVER_HOST=0.0.0.0
       - API_SERVER_PORT=8642
       - API_SERVER_KEY=${API_SERVER_KEY:?API_SERVER_KEY must be set — run scripts/start-hermes.ps1}
@@ -73,11 +72,10 @@ services:
       # Secrets come via the `environment:` block above from the parent shell.
       - .env
     ports:
-      # OpenAI-compatible API server — host loopback only.
-      # hermes-desktop の remote mode はここに URL=http://127.0.0.1:8642 と
-      # API_SERVER_KEY を bearer token として渡して接続する。
-      # LAN 公開する場合は API_SERVER_HOST=0.0.0.0 のまま `ports:` を
-      # `8642:8642` に変えるか、SSH tunnel / Tailscale を被せる。
+      # OpenAI-compatible API server — host loopback only. hermes-desktop の
+      # remote mode はここに URL=http://127.0.0.1:8642 と API_SERVER_KEY を
+      # bearer token として渡して接続する。LAN 公開する場合は ports: を
+      # `8642:8642` に変えるか SSH tunnel / Tailscale を被せる。
       - "127.0.0.1:8642:8642"
     command: ["gateway", "run"]
 
@@ -88,22 +86,24 @@ services:
     depends_on:
       - gateway
     volumes:
-      # Named volume (was bind-mount to ${USERPROFILE}/.hermes). Moved off
-      # the host filesystem so OAuth refresh tokens in auth.json are no
-      # longer readable by user-level processes (Codex Sandbox group, sync
-      # tools, malware running as the user, etc.). The volume lives in
-      # Docker's storage area (Windows: C:\ProgramData\Docker\volumes) and
-      # is reachable only via the docker socket.
-      #
-      # Migration from the old bind-mount layout is one-shot via
-      # scripts/migrate-to-named-volume.ps1. Backups now go through the
-      # docker socket (see scripts/backup.ps1). VPS / Mini PC migration
-      # uses the BW vault as the source of truth (hermes-restore.ps1).
+      # 同じ named volume を gateway とシェア (file ヘッダのコメント参照)。
       - "hermes-data:/opt/data"
     environment:
       - HERMES_UID=10000
       - HERMES_GID=10000
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY must be set — run scripts/start-hermes.ps1}
+      # dashboard process は read-only に近い使い方しかしないが、image が
+      # 同じなため import path で provider モジュールが load されると
+      # API key の存在を期待する。fail-fast (:?) ではなく optional (:-) に
+      # しておくと、dashboard だけ単体起動するケースや BW 未準備の
+      # 開発ループで blocking しない。
+      #
+      # トレードオフ: production の `docker compose up` で env が未設定だと
+      # dashboard が空 key 付きで silent 起動する。実害は provider 呼び出し
+      # 時に 401 が出るだけだが、デバッグで「なぜ rate limit に当たる前に
+      # 401?」となる可能性。dashboard は通常 start-hermes.ps1 経由で
+      # gateway と一緒に立ち上げるため、production パスでは BW から key が
+      # injected された状態になる。
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
     env_file:
       - .env
     ports:
@@ -122,6 +122,6 @@ volumes:
   hermes-data:
     # Declared with no driver_opts so Docker manages the storage path
     # itself. On Windows + Docker Desktop this lives inside the WSL2 VM's
-    # disk; on Linux hosts under /var/lib/docker/volumes/. Backups go
-    # through scripts/backup.ps1 (which runs a one-shot alpine container
-    # to tar the volume contents).
+    # disk; on Linux hosts under /var/lib/docker/volumes/. Backups via
+    # scripts/backup.ps1 (alpine sidecar + tar). See file header for the
+    # threat model rationale of moving off bind-mount.

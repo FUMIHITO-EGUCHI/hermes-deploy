@@ -1,3 +1,4 @@
+#Requires -Version 7.0
 # provision-bw-vault.ps1 — Bitwarden vault に Hermes 用構造を作成。
 #
 # 構造:
@@ -5,11 +6,22 @@
 #     ├── Item: Hermes / Provider Keys (Secure Note)
 #     │     field: deepseek_api_key   (既存 'DeepSeek API Key' item.login.password を自動 copy)
 #     ├── Item: Hermes / Self-Hosted Auth (Secure Note)
-#     │     field: api_server_key     (CSPRNG 32B -> base64url)
+#     │     field: api_server_key     (CSPRNG 32B -> 64-char lowercase hex)
 #     └── Item: Hermes / OAuth State   (Secure Note)
 #           notes: <auth.json raw JSON>  (base64 化せず raw 格納)
 #
-# Idempotent。secret 値はプロセス内のみ、ログには length しか出さない。
+# Idempotent: 既存 item は New-SecureNote の existence check で skip される
+# ため、再実行で上書きされることはない。
+#
+# 注意 — key 形式を作り直したい場合 (例: 旧 base64url の api_server_key を
+# hex に揃えたい等):
+#   1. BW vault GUI で対象 item を削除
+#   2. このスクリプトを再実行 → 新形式で再生成
+#   3. `pwsh start-hermes.ps1` で container を再起動 (新 key を inject)
+# step 3 を踏まないと、container 内の旧 API_SERVER_KEY と vault 上の
+# 新 key が乖離して bearer 認証が破綻する。
+#
+# secret 値はプロセス内のみ、ログには length しか出さない。
 #
 # 設計判断:
 #   * bw CLI 2026.x で `--session` / `BW_SESSION` 経路が壊れている
@@ -17,6 +29,9 @@
 #   * bw serve の起動・unlock・テアダウンは bw-session.psm1 の
 #     Start-BwServe / Stop-BwServe / Invoke-BwServeApi / Get-BwServeItem を
 #     使う (start-hermes.ps1 / hermes-restore.ps1 と同じヘルパ。重複削減)。
+#   * `RandomNumberGenerator.Fill` は .NET 5+ 限定なので PS7 を必須化。
+#     PS 5.1 では `MethodNotFoundException` になるのでヘッダの #Requires で
+#     早期 fail させる。
 #
 # 実行 (TTY 必須):
 #   pwsh -NoProfile -File scripts/provision-bw-vault.ps1
@@ -77,12 +92,11 @@ try {
     # ------------------------------------------------------------------------
     Write-Host ""
     Write-Host "Step 3: Generate api_server_key" -ForegroundColor Cyan
-    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-    try {
-        $rngBytes = New-Object byte[] 32
-        $rng.GetBytes($rngBytes)
-    } finally { $rng.Dispose() }
-    $apiServerKey = ([Convert]::ToBase64String($rngBytes)) -replace '\+','-' -replace '/','_' -replace '=$',''
+    # 32 random bytes → 64-char lowercase hex. base64url substitution was
+    # gratuitous: `Authorization: Bearer ...` permits +/= (RFC 6750).
+    $rngBytes = [byte[]]::new(32)
+    [System.Security.Cryptography.RandomNumberGenerator]::Fill($rngBytes)
+    $apiServerKey = ([BitConverter]::ToString($rngBytes) -replace '-','').ToLower()
     Write-Host "  Generated api_server_key (length: $($apiServerKey.Length))" -ForegroundColor Green
 
     # ------------------------------------------------------------------------
