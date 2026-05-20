@@ -94,7 +94,10 @@ function Start-BwServe {
 
     # Acquire the master password — either from the caller-supplied
     # SecureString or interactively from the TTY.
-    if (-not $SecurePassword) {
+    # Track who owns the SecureString so we only dispose what we created.
+    # A caller-supplied SecureString belongs to the caller.
+    $localPw = -not $PSBoundParameters.ContainsKey('SecurePassword')
+    if ($localPw) {
         Write-Host "Unlocking BW vault (REST)..." -ForegroundColor Cyan
         $SecurePassword = Read-Host "Master password" -AsSecureString
     }
@@ -117,6 +120,9 @@ function Start-BwServe {
     } finally {
         [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
         $pwPlain = $null
+        # Dispose only the locally-created SecureString. A caller-supplied
+        # instance is the caller's responsibility.
+        if ($localPw -and $SecurePassword) { $SecurePassword.Dispose() }
     }
 
     Invoke-RestMethod -Uri "$base/sync" -Method Post -ErrorAction SilentlyContinue | Out-Null
