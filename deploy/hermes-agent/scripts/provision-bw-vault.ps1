@@ -10,7 +10,18 @@
 #     └── Item: Hermes / OAuth State   (Secure Note)
 #           notes: <auth.json raw JSON>  (base64 化せず raw 格納)
 #
-# Idempotent。secret 値はプロセス内のみ、ログには length しか出さない。
+# Idempotent: 既存 item は New-SecureNote の existence check で skip される
+# ため、再実行で上書きされることはない。
+#
+# 注意 — key 形式を作り直したい場合 (例: 旧 base64url の api_server_key を
+# hex に揃えたい等):
+#   1. BW vault GUI で対象 item を削除
+#   2. このスクリプトを再実行 → 新形式で再生成
+#   3. `pwsh start-hermes.ps1` で container を再起動 (新 key を inject)
+# step 3 を踏まないと、container 内の旧 API_SERVER_KEY と vault 上の
+# 新 key が乖離して bearer 認証が破綻する。
+#
+# secret 値はプロセス内のみ、ログには length しか出さない。
 #
 # 設計判断:
 #   * bw CLI 2026.x で `--session` / `BW_SESSION` 経路が壊れている

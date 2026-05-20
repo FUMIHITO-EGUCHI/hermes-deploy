@@ -96,6 +96,13 @@ services:
       # API key の存在を期待する。fail-fast (:?) ではなく optional (:-) に
       # しておくと、dashboard だけ単体起動するケースや BW 未準備の
       # 開発ループで blocking しない。
+      #
+      # トレードオフ: production の `docker compose up` で env が未設定だと
+      # dashboard が空 key 付きで silent 起動する。実害は provider 呼び出し
+      # 時に 401 が出るだけだが、デバッグで「なぜ rate limit に当たる前に
+      # 401?」となる可能性。dashboard は通常 start-hermes.ps1 経由で
+      # gateway と一緒に立ち上げるため、production パスでは BW から key が
+      # injected された状態になる。
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
     env_file:
       - .env
