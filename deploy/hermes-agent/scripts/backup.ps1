@@ -35,11 +35,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Verify the named volume actually exists. Used to be a Test-Path on a
-# bind-mount path, which has been wrong since the named-volume migration —
-# the script silently tar'd an empty directory and reported success.
-$volExists = docker volume ls --filter "name=^$VolumeName`$" --format '{{.Name}}' 2>$null
-if (($volExists -join '').Trim() -ne $VolumeName) {
+# Verify the named volume exists before we tear down the containers.
+# `docker volume inspect` returns non-zero on missing and avoids the
+# `docker volume ls --filter` partial-match ambiguity.
+docker volume inspect $VolumeName 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) {
     throw "Named volume '$VolumeName' not found. Has the migration run? See scripts/migrate-to-named-volume.ps1."
 }
 
