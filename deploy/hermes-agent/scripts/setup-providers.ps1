@@ -95,14 +95,16 @@ function Get-CodexStatus {
 }
 
 function Get-ClaudeStatus {
-    # Three independent signals; any one suffices for Hermes to route via
-    # the Claude subscription, because the anthropic adapter resolves a
-    # token from this chain at request time:
-    #   1. `claude auth status` (the bundled claude CLI's own view).
-    #   2. /opt/data/.claude/.credentials.json (the file the adapter reads).
-    #   3. Hermes' pooled credentials for the `anthropic` provider — this
-    #      is where `hermes auth add anthropic --type api-key` (used by the
-    #      `setup-token` mode below) stores the sk-ant-oat01-* token.
+    # Hermes' anthropic adapter walks three sources at request time, in
+    # order, and uses the first that has a live token:
+    #   1. Claude CLI's session (`claude auth status` — backed by
+    #      /opt/data/.claude/.token.json after `claude auth login`).
+    #   2. /opt/data/.claude/.credentials.json (set by `import` mode, or
+    #      by the `--claudeai` OAuth flow in newer CLI builds).
+    #   3. Hermes' own credential pool for `anthropic` (populated by
+    #      `hermes auth add anthropic --type api-key` for sk-ant-oat01-*).
+    # Any of the three being live means the next request will route. We
+    # surface all three flags so callers can report which path is active.
     $cliJson = docker exec -u hermes $Container claude auth status --json 2>$null
     if (-not $cliJson) { $cliJson = docker exec -u hermes $Container claude auth status 2>$null }
     $cliLoggedIn = $false
@@ -222,14 +224,15 @@ function Invoke-ClaudeLogin {
     # Hermes daemon to read.
     #
     # `claude auth login --claudeai` is the current idiomatic flow for the
-    # Claude.ai subscription. `setup-token` is a legacy path that the CLI
-    # 2.1.x still ships but the help text describes as long-lived tokens,
-    # which is the wrong shape for Hermes' refresh-and-rotate loop.
+    # Claude.ai subscription. `setup-token` is the wrong shape for Hermes
+    # (long-lived API tokens vs. refresh-and-rotate) — earlier versions of
+    # this script tried it as a fallback when --claudeai failed, but that
+    # only masked the primary path's error. If --claudeai exits non-zero
+    # the operator needs to see why: re-run with -ClaudeMode setup-token
+    # explicitly to use the long-lived path on purpose.
     docker exec -it -u hermes $Container claude auth login --claudeai
     if ($LASTEXITCODE -ne 0) {
-        Write-Warning "claude auth login exited $LASTEXITCODE — trying legacy setup-token fallback"
-        docker exec -it -u hermes $Container claude setup-token
-        if ($LASTEXITCODE -ne 0) { throw "claude login failed via both auth login and setup-token" }
+        throw "claude auth login --claudeai exited $LASTEXITCODE. Re-run with -ClaudeMode setup-token if you want the legacy long-lived-token path."
     }
 
     # Post-login: verify Hermes can actually see the credentials. Newer

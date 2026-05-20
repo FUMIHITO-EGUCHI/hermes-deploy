@@ -97,13 +97,10 @@ function Test-SafeProjectName {
     #     `..`, `.git`, `.ssh`, etc. that would either traverse out of
     #     /workspace or land in unexpected places)
     #   - remaining chars are [A-Za-z0-9._-]
-    #   - reject the literal `.` and `..` explicitly even though the
-    #     first-char rule already covers them, for fail-loud diagnostics
     # This rejects whitespace, ANSI escapes, path separators, glob meta
     # chars — anything that could hijack the Write-Host log below or
     # escape /workspace.
     param([Parameter(Mandatory)][string]$Name)
-    if ($Name -in @('.', '..')) { return $false }
     return ($Name -match '^[A-Za-z0-9_-][A-Za-z0-9._-]*$')
 }
 
