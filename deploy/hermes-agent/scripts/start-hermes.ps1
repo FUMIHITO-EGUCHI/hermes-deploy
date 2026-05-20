@@ -90,4 +90,13 @@ try {
     Write-Host "Stop:        pwsh $PSScriptRoot\stop-hermes.ps1"
 } finally {
     Pop-Location -ErrorAction SilentlyContinue
+    # container は env を起動時に copy 済み。host shell には残す必要無く、
+    # `printenv` / 子プロセス継承 / screen-share 経由の漏洩面を消すため
+    # 明示削除する。`$env:X = $null` は PS 5.1 で空文字列残置のため
+    # .NET API で proc env block から物理削除。
+    [Environment]::SetEnvironmentVariable('DEEPSEEK_API_KEY', $null, 'Process')
+    [Environment]::SetEnvironmentVariable('API_SERVER_KEY',   $null, 'Process')
+    # 注: BW_SESSION はここでは scrub しない。DPAPI cache が次回起動の
+    # 沈黙役を担うので env に残しても利得薄く、削除すると同じ terminal の
+    # 後続 `bw` 呼び出しが master pw 再入力を要求する UX 害がある。
 }

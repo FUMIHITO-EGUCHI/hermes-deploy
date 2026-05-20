@@ -424,14 +424,19 @@ function Start-BwServe {
 
     $base = "http://localhost:$Port"
 
-    # ポート衝突チェック (既存 bw serve があれば早期 fail)
+    # ポート衝突チェック (既存 bw serve があれば早期 fail)。
+    # 直前のバージョンは `throw` を try ブロック内で出していたため、続く
+    # catch{} (connection refused を握りつぶす意図) に飲まれて衝突を
+    # 検出できなかった。フラグで try を抜けてから throw する。
+    $alreadyRunning = $false
     try {
         $existing = Invoke-RestMethod -Uri "$base/status" -Method Get -TimeoutSec 2 -ErrorAction Stop
-        if ($existing.success) {
-            throw "Port $Port is already serving a bw instance. Stop it or pass -Port <other>."
-        }
+        if ($existing.success) { $alreadyRunning = $true }
     } catch {
         # connection refused は期待動作 (これから起動する)
+    }
+    if ($alreadyRunning) {
+        throw "Port $Port is already serving a bw instance. Stop it or pass -Port <other>."
     }
 
     $job = Start-Job -ScriptBlock {

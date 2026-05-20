@@ -11,19 +11,32 @@
 #   └── Hermes / OAuth State        ← this script
 #         .notes = raw auth.json (JSON 文字列をそのまま格納、base64 化なし)
 #
+# bw 2026.x で `--session` / `BW_SESSION` が無視される #12270 を踏むため、
+# CLI subprocess 経路ではなく bw serve REST API 経由で読み書きする
+# (bw-session.psm1 の Start-BwServe / Invoke-BwServeApi / Get-BwServeItem)。
+#
 # Security invariants:
-#   1. BW session は argv に乗せない。Invoke-BwInternal の ExtraEnv 経由で渡す。
-#   2. 復号後の auth.json バイト列は host FS に置かない。stdin で alpine に流し、
-#      named volume 内にのみ実体化する。
+#   1. master pw / session は bw serve プロセス内に閉じ込め、argv にも env
+#      にも漏らさない。
+#   2. 復号後の auth.json バイト列は host FS に置かない。stdin で alpine に
+#      流し、named volume 内にのみ実体化する。
 #   3. JSON バリデーションは pull / push 双方向で実施。
 
 [CmdletBinding(DefaultParameterSetName = 'Pull')]
 param(
     [Parameter(ParameterSetName = 'Pull')] [switch]$Pull,
     [Parameter(ParameterSetName = 'Push')] [switch]$Push,
+    # 新 3-item 構造の item 名はスラッシュを含むので、旧 ValidatePattern
+    # (`'^[A-Za-z0-9 _.\-]+$'`) は使えない。/ を許容しつつシェルメタは
+    # 引き続き拒否する。bw API は path-style 解釈をしないので、ここでの
+    # validation は「明らかに変な値の早期 fail」目的。
+    [ValidatePattern('^[A-Za-z0-9 /_.\-]+$')]
     [string]$BwItem        = 'Hermes / OAuth State',
+    [ValidatePattern('^[A-Za-z0-9_-]+$')]
     [string]$VolumeName    = 'hermes-data',
+    [ValidatePattern('^[A-Za-z0-9_-]+$')]
     [string]$ContainerName = 'hermes',
+    [int]   $BwServePort   = 8087,
     [switch]$Force
 )
 
@@ -72,25 +85,15 @@ function Assert-ValidAuthJson {
     }
 }
 
-function Get-BwItemObject {
-    # BW item を 1 回だけ取得して PSCustomObject で返す。Get-BwField を field
-    # 数だけ呼ぶと毎回 server fetch するため、まとめて取得して使い回す。
-    param([string]$Name)
-    $session = Get-BwSession
-    $r = Invoke-BwInternal -BwArgs @('get','item',$Name) -ExtraEnv @{ BW_SESSION = $session }
-    if ($r.ExitCode -ne 0 -or -not $r.Stdout) {
-        throw "BW item '$Name' fetch failed: $($r.Stderr)"
-    }
-    return ($r.Stdout | ConvertFrom-Json)
-}
-
 # -----------------------------------------------------------------------------
 # Pull (BW → volume)
 # -----------------------------------------------------------------------------
 function Invoke-PullFromBw {
+    param([pscustomobject]$BwSession)
+
     Write-Host "=== Pulling auth.json from BW '$BwItem' → volume '$VolumeName' ===" -ForegroundColor Cyan
 
-    $item = Get-BwItemObject -Name $BwItem
+    $item = Get-BwServeItem -Session $BwSession -Name $BwItem
     $authText = $item.notes
     if (-not $authText) {
         throw "BW item '$BwItem' notes is empty. -Push first to upload the existing local auth.json."
@@ -135,6 +138,8 @@ function Invoke-PullFromBw {
 # Push (volume → BW)
 # -----------------------------------------------------------------------------
 function Invoke-PushToBw {
+    param([pscustomobject]$BwSession)
+
     Write-Host "=== Pushing volume '$VolumeName' auth.json → BW '$BwItem' ===" -ForegroundColor Cyan
 
     if (-not (Test-VolumeExists)) { throw "Volume '$VolumeName' does not exist. Nothing to push." }
@@ -168,25 +173,13 @@ function Invoke-PushToBw {
         }
     }
 
-    # bw edit item は payload を base64 化して stdin から食わせる。secret は
-    # argv に乗らない。`bw serve` は localhost HTTP に貼り付くため、同一ユーザ
-    # の他プロセスから無認証アクセス可能 → script 起動の最小権限 stdin 経由が筋。
-    $item = Get-BwItemObject -Name $BwItem
+    # bw serve の PUT /object/item/<id> で item ごと差し替える。secret は
+    # HTTP body 経由 (loopback bind のみ) で argv/env に乗らない。
+    $item = Get-BwServeItem -Session $BwSession -Name $BwItem
     $item.notes = $authText
+    Invoke-BwServeApi -Session $BwSession -Method PUT -Path "/object/item/$($item.id)" -Body $item | Out-Null
 
-    $session = Get-BwSession
-    $patchedJson    = $item | ConvertTo-Json -Depth 32 -Compress
-    $patchedJsonB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($patchedJson))
-
-    $editRes = Invoke-BwInternal `
-        -BwArgs @('edit', 'item', $item.id) `
-        -StdinInput $patchedJsonB64 `
-        -ExtraEnv @{ BW_SESSION = $session }
-    if ($editRes.ExitCode -ne 0) {
-        throw "bw edit item failed (exit $($editRes.ExitCode)): $($editRes.Stderr)"
-    }
-
-    Write-Host "Pushed. BW item '$BwItem' notes updated via stdin." -ForegroundColor Green
+    Write-Host "Pushed. BW item '$BwItem' notes updated." -ForegroundColor Green
 }
 
 # -----------------------------------------------------------------------------
@@ -198,4 +191,15 @@ function Invoke-PushToBw {
 if ($PSCmdlet.ParameterSetName -eq 'Pull') { $Pull = $true }
 if ($PSCmdlet.ParameterSetName -eq 'Push') { $Push = $true }
 
-if ($Push) { Invoke-PushToBw } else { Invoke-PullFromBw }
+# bw serve を 1 回起動して unlock し、Pull / Push の操作が終わるまで保持。
+Write-Host "Starting bw serve backend..." -ForegroundColor Cyan
+$bw = Start-BwServe -Port $BwServePort
+try {
+    if ($Push) {
+        Invoke-PushToBw -BwSession $bw
+    } else {
+        Invoke-PullFromBw -BwSession $bw
+    }
+} finally {
+    Stop-BwServe -Session $bw
+}
