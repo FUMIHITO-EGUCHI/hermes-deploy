@@ -77,12 +77,11 @@ try {
     # ------------------------------------------------------------------------
     Write-Host ""
     Write-Host "Step 3: Generate api_server_key" -ForegroundColor Cyan
-    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-    try {
-        $rngBytes = New-Object byte[] 32
-        $rng.GetBytes($rngBytes)
-    } finally { $rng.Dispose() }
-    $apiServerKey = ([Convert]::ToBase64String($rngBytes)) -replace '\+','-' -replace '/','_' -replace '=$',''
+    # 32 random bytes → 64-char lowercase hex. base64url substitution was
+    # gratuitous: `Authorization: Bearer ...` permits +/= (RFC 6750).
+    $rngBytes = [byte[]]::new(32)
+    [System.Security.Cryptography.RandomNumberGenerator]::Fill($rngBytes)
+    $apiServerKey = ([BitConverter]::ToString($rngBytes) -replace '-','').ToLower()
     Write-Host "  Generated api_server_key (length: $($apiServerKey.Length))" -ForegroundColor Green
 
     # ------------------------------------------------------------------------
