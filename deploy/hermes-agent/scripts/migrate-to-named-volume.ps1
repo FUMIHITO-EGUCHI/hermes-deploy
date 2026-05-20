@@ -7,8 +7,9 @@
 #
 # What it does:
 #   1. Verify the legacy bind-mount path exists and contains data.
-#   2. `docker compose stop` the existing containers (so nothing writes
-#      while we copy).
+#   2. `docker stop`/`docker rm` the known hermes containers directly
+#      (avoids the compose-down env-interpolation trap — see step 2
+#      block below).
 #   3. Create the `hermes-data` named volume.
 #   4. Copy every file under ${USERPROFILE}/.hermes/ into the volume,
 #      preserving ownership as hermes:hermes (uid 10000).
@@ -87,6 +88,8 @@ if (-not (Test-VolumeReadyToReceive)) {
 # because we're about to recreate them with the new mount layout via
 # start-hermes.ps1, so the compose-level lifecycle doesn't add value here.
 # -----------------------------------------------------------------------------
+# Container names mirror compose's `container_name:` fields. If you
+# customize those in the compose file, mirror the change here.
 $liveContainers = @('hermes', 'hermes-dashboard') | Where-Object {
     $running = docker ps -a --filter "name=^$_`$" --format '{{.Names}}' 2>$null
     ($running -join '').Trim() -eq $_
@@ -146,15 +149,15 @@ docker run --rm -v "${LegacyDataDir}:/source:ro" -v "${VolumeName}:/dest" alpine
 if ($LASTEXITCODE -ne 0) { throw "Migration copy failed (exit $LASTEXITCODE). Volume left with .staging/ dir for inspection; re-running will retry cleanly." }
 
 # Verify: file count, auth.json size, ownership.
+# Same CRLF-safety constraint as $shScript above — single line, no
+# embedded newlines, so checking this file out under core.autocrlf=true
+# doesn't break verification output.
 Write-Host ""
 Write-Host "Verification:" -ForegroundColor Cyan
-docker run --rm -v "${VolumeName}:/data:ro" alpine sh -c "
-  echo 'top-level entries:'
-  ls -la /data | head -20
-  echo ''
-  echo 'auth.json:'
-  stat -c '  size=%s owner=%U:%G mode=%a' /data/auth.json 2>/dev/null || echo '  (missing)'
-"
+$shVerify = 'echo "top-level entries:"; ls -la /data | head -20; ' +
+    'echo ""; echo "auth.json:"; ' +
+    'stat -c "  size=%s owner=%U:%G mode=%a" /data/auth.json 2>/dev/null || echo "  (missing)"'
+docker run --rm -v "${VolumeName}:/data:ro" alpine sh -c $shVerify
 
 Write-Host ""
 Write-Host "Migration done." -ForegroundColor Green
