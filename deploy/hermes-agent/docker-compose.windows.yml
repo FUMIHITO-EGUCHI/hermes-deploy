@@ -1,83 +1,78 @@
-# docker-compose.windows.yml — Hermes Agent (Windows + Docker Desktop / WSL2 backend)
+# docker-compose.windows.yml — Hermes Agent (Windows + Docker Desktop / WSL2)
 #
 # Differences vs upstream docker-compose.yml:
 #   - network_mode: host removed (not supported on Docker Desktop for Windows).
 #   - Explicit ports: dashboard 9119 + API server 8642, both bound to
 #     127.0.0.1 only.
-#   - State volume is a named Docker volume (`hermes-data`), NOT a host
-#     bind-mount. Tokens in /opt/data/auth.json are no longer readable from
-#     the host filesystem. Migration / portability goes through the BW
-#     vault (scripts/hermes-restore.ps1) or a tarball
-#     (scripts/backup.ps1, which uses an alpine sidecar — see its header).
+#   - State lives in a named Docker volume (`hermes-data`), not a host
+#     bind-mount. Tokens in /opt/data/auth.json are unreadable from
+#     the host filesystem.
 #
 # About the hermes-data volume (referenced from both services below):
-#   Moved off the host filesystem so OAuth refresh tokens in auth.json are
-#   no longer readable by user-level processes (Codex Sandbox group, sync
-#   tools, malware running as the user, etc.). The volume lives in Docker's
-#   storage area (Windows: WSL2 VM ext4; Linux: /var/lib/docker/volumes/)
-#   and is reachable only via the docker socket.
+#   On the host filesystem the volume would expose OAuth refresh tokens
+#   in auth.json to anything running as your user (Codex Sandbox group,
+#   sync tools, malware running as the user, etc.). Moving it into
+#   Docker's storage area (Windows: WSL2 VM ext4; Linux:
+#   /var/lib/docker/volumes/) puts it behind the docker socket.
 #
-# Place this file inside the cloned hermes-agent repo (build context = `.`),
-# or run it with `docker compose -f /abs/path/to/docker-compose.windows.yml
-# --project-directory C:\path\to\hermes-agent up -d`.
-#
-# Usage (from the cloned hermes-agent repo root):
-#   copy ..\hermes\deploy\hermes-agent\docker-compose.windows.yml .
-#   copy ..\hermes\deploy\hermes-agent\.env.template .env   # then edit keys
-#   docker compose -f docker-compose.windows.yml up -d
+# Usage:
+#   1. Clone NousResearch/hermes-agent next to this repo (build context).
+#   2. Copy this file into the cloned hermes-agent dir, or run with
+#      `--project-directory <path-to-hermes-agent>`.
+#   3. `docker compose -f docker-compose.windows.yml up -d`
+#   4. First-time setup (one-shot, interactive):
+#        docker exec -it hermes hermes setup
+#        docker exec -it hermes hermes login <provider>
+#        docker exec -it hermes hermes gateway setup   # optional, for Discord/etc
+#      Credentials land in /opt/data/auth.json inside the volume — host
+#      never touches them.
 #
 # Security notes:
-#   - Dashboard binds 127.0.0.1 only. Do NOT change to 0.0.0.0 without auth.
-#   - The .env file holds API keys — never commit it. .gitignore must cover it.
+#   - All published ports are bound to 127.0.0.1. LAN can't reach them.
+#   - No host-side .env injection. Hermes manages its own credentials in
+#     /opt/data/{auth.json,.env} inside the named volume. Back up via
+#     `docker exec hermes hermes backup`.
 
 services:
   gateway:
+    # Build context is `.` — i.e. the directory you run `docker compose -f
+    # docker-compose.windows.yml ...` from. Per the file header, that's the
+    # cloned NousResearch/hermes-agent root (Dockerfile + source live there).
+    # If you invoke compose with `--project-directory <path>`, that path is
+    # what `.` resolves to instead.
     build: .
     image: hermes-agent
     container_name: hermes
     restart: unless-stopped
     volumes:
       - "hermes-data:/opt/data"
-      # Projects workspace — the directory tree that holds every repo you
-      # want Hermes to operate on. Mounted read-write so the agent can edit
-      # source files. Each subdirectory becomes /workspace/<project> inside
-      # the container; pick the one you want with `hermes-on.ps1 <name>` or
-      # `docker exec -w /workspace/<name> ...`.
-      - "${HERMES_PROJECTS:-${USERPROFILE}/Documents/Git}:/workspace:rw"
     environment:
       - HERMES_UID=10000
       - HERMES_GID=10000
-      # API keys are injected from the parent shell (e.g. scripts/start-hermes.ps1
-      # which pulls them out of Bitwarden). The :? syntax fails compose-up loudly
-      # if the var is unset — preferable to silently starting with no provider.
-      # Add more providers here as you wire them up; keep the same pattern.
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:?DEEPSEEK_API_KEY must be set — run scripts/start-hermes.ps1}
-      # Optional extras — uncomment as needed (don't add :? to optionals)
-      # - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
-      # - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      # OpenAI-compatible API server (`gateway run` が内包する FastAPI server)。
-      # hermes-desktop / OpenWebUI / 任意の OpenAI-compat クライアントから
-      # http://127.0.0.1:8642/v1 で接続する用途。
-      # - HOST=0.0.0.0 は container 内部の bind。host 側 publish は下記
-      #   `ports:` で 127.0.0.1:8642 に絞る。
-      # - KEY は API_SERVER_HOST が非ループバックの時に Hermes 本体が必須化
-      #   (gateway/platforms/api_server.py)。BW vault の
-      #   'Hermes / Self-Hosted Auth' / api_server_key に保管し、
-      #   start-hermes.ps1 が起動時に注入する。
+      # API server bind config. Container-internal 0.0.0.0 is required because
+      # Docker port-mapping cannot reach a container's loopback. Host exposure
+      # is bounded by the `ports:` line below which publishes only to
+      # 127.0.0.1. LAN cannot reach this.
       - API_SERVER_HOST=0.0.0.0
       - API_SERVER_PORT=8642
-      - API_SERVER_KEY=${API_SERVER_KEY:?API_SERVER_KEY must be set — run scripts/start-hermes.ps1}
-    env_file:
-      # Non-secret settings only (HERMES_DATA, model defaults, messenger IDs).
-      # Secrets come via the `environment:` block above from the parent shell.
-      - .env
     ports:
-      # OpenAI-compatible API server — host loopback only. hermes-desktop の
-      # remote mode はここに URL=http://127.0.0.1:8642 と API_SERVER_KEY を
-      # bearer token として渡して接続する。LAN 公開する場合は ports: を
-      # `8642:8642` に変えるか SSH tunnel / Tailscale を被せる。
+      # OpenAI-compatible API server — host loopback only. hermes-desktop's
+      # remote mode points here. For LAN access use SSH tunnel or Tailscale.
       - "127.0.0.1:8642:8642"
-    command: ["gateway", "run"]
+    # `--insecure` overrides Hermes' refusal to bind 0.0.0.0 without a bearer
+    # key. The endpoint stays reachable on 127.0.0.1:8642 with NO auth —
+    # safe only because the `ports:` mapping above is loopback-only, so the
+    # exposure surface is just other processes running as your user on this
+    # host.
+    #
+    # THREAT MODEL: any local process (browser extension, malicious npm
+    # postinstall, leaked dev-tools port forwarder, etc.) running as your
+    # user can chat with Hermes and burn provider quota without
+    # authentication. If you don't trust everything that runs locally as
+    # your user, drop `--insecure`, set `API_SERVER_KEY=<random hex>` in
+    # the environment block above, and configure your clients
+    # (hermes-desktop, OpenWebUI) to send it as a bearer token.
+    command: ["gateway", "run", "--insecure"]
 
   dashboard:
     image: hermes-agent
@@ -86,42 +81,27 @@ services:
     depends_on:
       - gateway
     volumes:
-      # 同じ named volume を gateway とシェア (file ヘッダのコメント参照)。
+      # Shares the same named volume as gateway (see file header).
       - "hermes-data:/opt/data"
     environment:
       - HERMES_UID=10000
       - HERMES_GID=10000
-      # dashboard process は read-only に近い使い方しかしないが、image が
-      # 同じなため import path で provider モジュールが load されると
-      # API key の存在を期待する。fail-fast (:?) ではなく optional (:-) に
-      # しておくと、dashboard だけ単体起動するケースや BW 未準備の
-      # 開発ループで blocking しない。
-      #
-      # トレードオフ: production の `docker compose up` で env が未設定だと
-      # dashboard が空 key 付きで silent 起動する。実害は provider 呼び出し
-      # 時に 401 が出るだけだが、デバッグで「なぜ rate limit に当たる前に
-      # 401?」となる可能性。dashboard は通常 start-hermes.ps1 経由で
-      # gateway と一緒に立ち上げるため、production パスでは BW から key が
-      # injected された状態になる。
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
-    env_file:
-      - .env
     ports:
       # Localhost-only. For remote access, SSH-tunnel: ssh -L 9119:localhost:9119
       - "127.0.0.1:9119:9119"
     command: ["dashboard", "--host", "0.0.0.0", "--no-open", "--insecure"]
-    # Why --insecure is acceptable here:
-    #   Dashboard binds 0.0.0.0 INSIDE the container (necessary because Docker
-    #   port mapping cannot reach a container's loopback). Hermes refuses
-    #   0.0.0.0 by default since the dashboard exposes API keys. --insecure
-    #   overrides that refusal. Exposure is bounded by the `ports:` line above
-    #   which only publishes to the host's 127.0.0.1 — LAN cannot reach it.
-    #   For LAN/remote access use SSH tunneling, NOT 0.0.0.0 on the host side.
+    # `--insecure` rationale: same as gateway above. Dashboard binds 0.0.0.0
+    # INSIDE the container; `ports:` only publishes to 127.0.0.1 on the host.
 
 volumes:
   hermes-data:
-    # Declared with no driver_opts so Docker manages the storage path
-    # itself. On Windows + Docker Desktop this lives inside the WSL2 VM's
-    # disk; on Linux hosts under /var/lib/docker/volumes/. Backups via
-    # scripts/backup.ps1 (alpine sidecar + tar). See file header for the
-    # threat model rationale of moving off bind-mount.
+    # `name:` pins the actual Docker volume name. Without it, compose v2
+    # prefixes top-level volumes with the project name (directory name by
+    # default → `hermes-agent_hermes-data`). Pinning makes the volume name
+    # invariant across compose / docker-cli call sites.
+    name: hermes-data
+    # No driver_opts — Docker manages the storage path. On Windows + Docker
+    # Desktop this lives inside the WSL2 VM's ext4 filesystem; on Linux
+    # hosts under /var/lib/docker/volumes/. Back up via
+    # `docker exec hermes hermes backup` (zips /opt/data into a portable
+    # archive) or via the alpine + tar pattern.
