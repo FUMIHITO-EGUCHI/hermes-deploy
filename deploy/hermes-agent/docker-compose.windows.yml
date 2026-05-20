@@ -35,6 +35,11 @@
 
 services:
   gateway:
+    # Build context is `.` — i.e. the directory you run `docker compose -f
+    # docker-compose.windows.yml ...` from. Per the file header, that's the
+    # cloned NousResearch/hermes-agent root (Dockerfile + source live there).
+    # If you invoke compose with `--project-directory <path>`, that path is
+    # what `.` resolves to instead.
     build: .
     image: hermes-agent
     container_name: hermes
@@ -55,7 +60,18 @@ services:
       # remote mode points here. For LAN access use SSH tunnel or Tailscale.
       - "127.0.0.1:8642:8642"
     # `--insecure` overrides Hermes' refusal to bind 0.0.0.0 without a bearer
-    # key. Safe here because the `ports:` mapping above is 127.0.0.1-only.
+    # key. The endpoint stays reachable on 127.0.0.1:8642 with NO auth —
+    # safe only because the `ports:` mapping above is loopback-only, so the
+    # exposure surface is just other processes running as your user on this
+    # host.
+    #
+    # THREAT MODEL: any local process (browser extension, malicious npm
+    # postinstall, leaked dev-tools port forwarder, etc.) running as your
+    # user can chat with Hermes and burn provider quota without
+    # authentication. If you don't trust everything that runs locally as
+    # your user, drop `--insecure`, set `API_SERVER_KEY=<random hex>` in
+    # the environment block above, and configure your clients
+    # (hermes-desktop, OpenWebUI) to send it as a bearer token.
     command: ["gateway", "run", "--insecure"]
 
   dashboard:
