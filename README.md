@@ -10,7 +10,6 @@
 
 - **Bitwarden 経由のシークレット管理** — API キー・OAuth トークン・`auth.json` をすべて BW vault に格納。Windows DPAPI でセッションキャッシュし、マスターパスワード入力は 1 日 1 回程度。
 - **双方向同期** — BW vault ↔ Docker named volume (`hermes-data`) を `hermes-restore.ps1 -Pull / -Push` で同期。
-- **コンテナ移行** — bind-mount から named volume へ atomic に移行する `migrate-to-named-volume.ps1` (staging dir + completion marker)。
 - **OAuth プロビジョニング** — Codex (device-code) / Claude PKCE / `sk-ant-oat01-*` setup-token を `setup-providers.ps1` で一括セットアップ。
 - **スコープ付きチャット起動** — `hermes-on.ps1 <project>` で `/workspace/<project>` を cwd にした Hermes Agent チャットを開く。`AGENTS.md` / `CLAUDE.md` 自動ロード。
 - **AutoRoute モード** — `-AutoRoute` フラグで DeepSeek-V4 (flash) を親エージェントに据え、`delegate_task` で Opus 4.7 / GPT-5.5 に重い判断だけ委譲。プロンプトキャッシュでコスト最適化。
@@ -55,7 +54,6 @@ pwsh deploy/hermes-agent/scripts/hermes-on.ps1 <project> -AutoRoute
 | `deploy/hermes-agent/scripts/bw-session.psm1` | Bitwarden CLI ラッパー (DPAPI セッションキャッシュ + stderr base64 redaction) |
 | `deploy/hermes-agent/scripts/hermes-on.ps1` | スコープ付きチャット起動 (`-AutoRoute` モード対応) |
 | `deploy/hermes-agent/scripts/hermes-restore.ps1` | BW vault ↔ named volume の双方向同期 |
-| `deploy/hermes-agent/scripts/migrate-to-named-volume.ps1` | bind-mount → named volume の atomic 移行 |
 | `deploy/hermes-agent/scripts/setup-providers.ps1` | Codex / Claude OAuth プロビジョニング |
 | `deploy/hermes-agent/scripts/start-hermes.ps1` / `stop-hermes.ps1` | ライフサイクル |
 | `deploy/hermes-agent/skills/auto-route-deepseek/SKILL.md` | DeepSeek 親エージェント用ルーティング誘導スキル |

@@ -120,6 +120,13 @@ services:
 
 volumes:
   hermes-data:
+    # `name:` pins the actual Docker volume name. Without it, compose v2
+    # prefixes top-level volumes with the project name (directory name by
+    # default → `hermes-agent_hermes-data`), which would diverge from the
+    # raw `hermes-data` that scripts/backup.ps1 and docker-cli operations
+    # target. Pin it explicitly so the volume name is invariant across
+    # compose / script / docker-cli call sites.
+    name: hermes-data
     # Declared with no driver_opts so Docker manages the storage path
     # itself. On Windows + Docker Desktop this lives inside the WSL2 VM's
     # disk; on Linux hosts under /var/lib/docker/volumes/. Backups via

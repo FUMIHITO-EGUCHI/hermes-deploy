@@ -263,33 +263,6 @@ entirely with `-SkipSkills`.
 
 ---
 
-## Migration from bind-mount
-
-Existing installs that use the legacy `${USERPROFILE}/.hermes` bind-mount
-need to move state into the new `hermes-data` named volume before
-restarting. One-shot:
-
-```powershell
-$DEPLOY = "C:\Users\$env:USERNAME\Documents\Git\hermes\deploy\hermes-agent"
-
-# 1. Replace the live compose file with the updated one (the volume
-#    declaration was added in this revision).
-Copy-Item "$DEPLOY\docker-compose.windows.yml" "$env:USERPROFILE\hermes-agent\"
-
-# 2. Migrate (stops containers, copies ~/.hermes into the named volume).
-pwsh "$DEPLOY\scripts\migrate-to-named-volume.ps1"
-
-# 3. Boot via the new launcher.
-pwsh "$DEPLOY\scripts\start-hermes.ps1"
-
-# 4. Push the volume's auth.json to BW so the next-host story is complete.
-pwsh "$DEPLOY\scripts\hermes-restore.ps1" -Push
-
-# 5. Verify everything works for a day or two, then (optional) delete the
-#    legacy bind-mount directory:
-Remove-Item -Recurse -Force "$env:USERPROFILE\.hermes"
-```
-
 ## VPS / Mini PC migration (with BW as source of truth)
 
 On the new host:
@@ -423,9 +396,6 @@ Today there are two backup paths, with different purposes:
   Restoring: `tar -xzf ...` into a freshly-created volume via the same
   pattern in reverse. (Not needed for the common new-host story — only
   if you want every session log to follow you across machines.)
-
-The legacy `scripts/backup.ps1` against `$env:USERPROFILE\.hermes` is
-useful only if you haven't yet run `migrate-to-named-volume.ps1`.
 
 ---
 

@@ -40,7 +40,7 @@ $ErrorActionPreference = 'Stop'
 # `docker volume ls --filter` partial-match ambiguity.
 docker volume inspect $VolumeName 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) {
-    throw "Named volume '$VolumeName' not found. Has the migration run? See scripts/migrate-to-named-volume.ps1."
+    throw "Named volume '$VolumeName' not found. Boot Hermes once via scripts/start-hermes.ps1 — compose creates the volume on first up."
 }
 
 # Resolve $OutDir to an absolute path: `docker -v` rejects relative paths,
