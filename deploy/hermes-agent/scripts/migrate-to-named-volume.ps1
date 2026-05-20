@@ -7,8 +7,9 @@
 #
 # What it does:
 #   1. Verify the legacy bind-mount path exists and contains data.
-#   2. `docker compose stop` the existing containers (so nothing writes
-#      while we copy).
+#   2. `docker stop`/`docker rm` the known hermes containers directly
+#      (avoids the compose-down env-interpolation trap — see step 2
+#      block below).
 #   3. Create the `hermes-data` named volume.
 #   4. Copy every file under ${USERPROFILE}/.hermes/ into the volume,
 #      preserving ownership as hermes:hermes (uid 10000).
@@ -77,18 +78,29 @@ if (-not (Test-VolumeReadyToReceive)) {
 
 # -----------------------------------------------------------------------------
 # 2. Stop containers if running (avoid mid-copy writes)
+#
+# We used to call `docker compose down`, but compose v2 runs ${VAR:?...}
+# interpolation on every subcommand, including `down`. The compose file
+# requires DEEPSEEK_API_KEY / API_SERVER_KEY — values which only exist in
+# the parent shell when start-hermes.ps1 invokes compose — so a bare
+# `compose down` from this script fails with "required variable missing".
+# Stop and remove the known container names directly; this is sufficient
+# because we're about to recreate them with the new mount layout via
+# start-hermes.ps1, so the compose-level lifecycle doesn't add value here.
 # -----------------------------------------------------------------------------
-if (Test-Path "$HermesDir\$ComposeFile") {
-    Write-Host "Stopping existing containers (graceful)..." -ForegroundColor Cyan
-    Push-Location $HermesDir
-    try {
-        # `down` so the bind-mount is fully released. `stop` alone would
-        # keep the container around with the old mount config; recreating
-        # with new mounts then needs `--force-recreate` anyway.
-        & docker compose -f $ComposeFile down 2>&1 | Out-String | Write-Host
-    } finally { Pop-Location }
+# Container names mirror compose's `container_name:` fields. If you
+# customize those in the compose file, mirror the change here.
+$liveContainers = @('hermes', 'hermes-dashboard') | Where-Object {
+    $running = docker ps -a --filter "name=^$_`$" --format '{{.Names}}' 2>$null
+    ($running -join '').Trim() -eq $_
+}
+if ($liveContainers.Count -gt 0) {
+    Write-Host "Stopping containers: $($liveContainers -join ', ')" -ForegroundColor Cyan
+    docker stop @liveContainers 2>&1 | Out-Null
+    Write-Host "Removing containers: $($liveContainers -join ', ')" -ForegroundColor Cyan
+    docker rm @liveContainers 2>&1 | Out-Null
 } else {
-    Write-Host "No compose file at $HermesDir\$ComposeFile — assuming no live containers." -ForegroundColor Yellow
+    Write-Host "No live hermes containers — proceeding." -ForegroundColor Yellow
 }
 
 # -----------------------------------------------------------------------------
@@ -111,45 +123,41 @@ docker volume create $VolumeName | Out-Null
 #    swallowed by a trailing `|| true`.
 # -----------------------------------------------------------------------------
 Write-Host "Copying $LegacyDataDir → volume '$VolumeName' (staged)..." -ForegroundColor Cyan
-$legacyFwd = $LegacyDataDir -replace '\\', '/'
-docker run --rm `
-    -v "${legacyFwd}:/source:ro" `
-    -v "${VolumeName}:/dest" `
-    alpine sh -c '
-        set -e
-        rm -rf /dest/.staging
-        mkdir -p /dest/.staging
-        cp -a /source/. /dest/.staging/
-        chown -R 10000:10000 /dest/.staging
-        # Tighten perms on known-sensitive files only if they exist;
-        # missing files are OK (fresh installs lack .claude/.credentials.json),
-        # but a present-and-chmod-failed case must surface.
-        if [ -f /dest/.staging/auth.json ]; then
-            chmod 600 /dest/.staging/auth.json
-        fi
-        if [ -f /dest/.staging/.claude/.credentials.json ]; then
-            chmod 600 /dest/.staging/.claude/.credentials.json
-        fi
-        # Atomic-ish promotion: move everything out of staging into /dest.
-        # We move each entry separately because /dest is the volume root
-        # itself and cant be replaced as a whole.
-        cd /dest/.staging && find . -mindepth 1 -maxdepth 1 -exec mv {} /dest/ \;
-        rmdir /dest/.staging
-        touch /dest/.migration-complete
-        chown 10000:10000 /dest/.migration-complete
-    '
+# The sh script is a single ;-chained line. PowerShell's `'...'` literal
+# preserves the file's line endings — when this file is saved as CRLF
+# (the Windows default and what core.autocrlf produces), the embedded
+# newlines arrive at alpine's `sh -c` as CRLF, which sh tokenizes as
+# stray CRs. Symptoms: `: not found` on the first blank line and
+# `set: illegal option -` on `set -e`. Keeping the script on one line
+# sidesteps the entire EOL-conversion class of failure.
+#
+# Bracket tests use `[ ... ] && cmd` (no `if/then/fi`) so the chained
+# `set -e` semantics still abort on real failures while a missing
+# sensitive file (auth.json absent on a fresh install) skips chmod
+# without exiting.
+$shScript = 'set -e; ' +
+    'rm -rf /dest/.staging; mkdir -p /dest/.staging; ' +
+    'cp -a /source/. /dest/.staging/; ' +
+    'chown -R 10000:10000 /dest/.staging; ' +
+    '[ ! -f /dest/.staging/auth.json ] || chmod 600 /dest/.staging/auth.json; ' +
+    '[ ! -f /dest/.staging/.claude/.credentials.json ] || chmod 600 /dest/.staging/.claude/.credentials.json; ' +
+    'cd /dest/.staging && find . -mindepth 1 -maxdepth 1 -exec mv {} /dest/ \;; ' +
+    'rmdir /dest/.staging; ' +
+    'touch /dest/.migration-complete; ' +
+    'chown 10000:10000 /dest/.migration-complete'
+docker run --rm -v "${LegacyDataDir}:/source:ro" -v "${VolumeName}:/dest" alpine sh -c $shScript
 if ($LASTEXITCODE -ne 0) { throw "Migration copy failed (exit $LASTEXITCODE). Volume left with .staging/ dir for inspection; re-running will retry cleanly." }
 
 # Verify: file count, auth.json size, ownership.
+# Same CRLF-safety constraint as $shScript above — single line, no
+# embedded newlines, so checking this file out under core.autocrlf=true
+# doesn't break verification output.
 Write-Host ""
 Write-Host "Verification:" -ForegroundColor Cyan
-docker run --rm -v "${VolumeName}:/data:ro" alpine sh -c "
-  echo 'top-level entries:'
-  ls -la /data | head -20
-  echo ''
-  echo 'auth.json:'
-  stat -c '  size=%s owner=%U:%G mode=%a' /data/auth.json 2>/dev/null || echo '  (missing)'
-"
+$shVerify = 'echo "top-level entries:"; ls -la /data | head -20; ' +
+    'echo ""; echo "auth.json:"; ' +
+    'stat -c "  size=%s owner=%U:%G mode=%a" /data/auth.json 2>/dev/null || echo "  (missing)"'
+docker run --rm -v "${VolumeName}:/data:ro" alpine sh -c $shVerify
 
 Write-Host ""
 Write-Host "Migration done." -ForegroundColor Green
