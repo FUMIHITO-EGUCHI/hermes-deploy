@@ -89,8 +89,12 @@ services:
         set -e
         KEYFILE=/opt/data/.api_server_key
         if [ ! -s "$$KEYFILE" ]; then
-          python3 -c 'import secrets; print(secrets.token_hex(32))' > "$$KEYFILE"
-          chmod 600 "$$KEYFILE"
+          # Subshell + umask 177 so the key file is born with mode 600.
+          # The previous `> file ; chmod 600 file` sequence left a brief
+          # window where the file was world-readable; if the container
+          # was force-killed between those two steps, the next boot would
+          # find a non-empty 644 file and reuse it.
+          (umask 177 && python3 -c 'import secrets; print(secrets.token_hex(32))' > "$$KEYFILE")
         fi
         export API_SERVER_KEY="$$(cat $$KEYFILE)"
         exec /opt/hermes/.venv/bin/hermes gateway run
