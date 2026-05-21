@@ -8,20 +8,21 @@
 
 ## 技術スタック
 
-- 構成物: `docker-compose.windows.yml` (Hermes Agent コンテナ起動定義) と `scripts/backup.ps1` (Hermes 内蔵 `hermes backup` の Windows Task Scheduler 用ラッパ)
+- 構成物: `deploy/hermes-agent/docker-compose.windows.yml` (Hermes Agent コンテナ起動定義)
 - 実行環境: Windows 11 + Docker Desktop (WSL2 backend)、PowerShell 7
-- 言語ランタイム不要: アプリ本体は upstream の Hermes Agent (Python) が container 内で完結。本リポは設定とラッパだけを管理
+- 言語ランタイム不要: アプリ本体は upstream の Hermes Agent (Python) が container 内で完結。本リポは設定だけを管理
 
 ## コマンド
 
-このリポ自体にビルド対象はない。動作確認は以下:
+このリポ自体にビルド対象はない。動作確認は変更対象に応じて選ぶ:
 
-| 用途 | コマンド |
+| コマンド | 用途 |
 |---|---|
-| compose 設定検証 | `docker compose -f deploy/hermes-agent/docker-compose.windows.yml config` |
-| backup スクリプト dry-run | `pwsh -NoProfile -File deploy/hermes-agent/scripts/backup.ps1 -OutDir ./tmp` |
+| `docker compose -f deploy/hermes-agent/docker-compose.windows.yml config` | compose 設定検証 |
+| `docker compose -f deploy/hermes-agent/docker-compose.windows.yml up -d` | compose 起動 |
+| `docker exec -it hermes /opt/hermes/.venv/bin/hermes status` | ヘルスチェック |
 
-完了報告前は変更箇所の手動確認 (compose ならコンテナ再起動で立ち上がるか、backup なら zip が生成されるか) を行う。
+完了報告前は変更箇所の手動確認 (compose ならコンテナ再起動で立ち上がるか) を行う。
 
 ## タスク管理（AI handoff）
 
@@ -42,7 +43,6 @@
 | パス | 役割 |
 |---|---|
 | `deploy/hermes-agent/docker-compose.windows.yml` | Hermes Agent コンテナ定義 (Windows + Docker Desktop) |
-| `deploy/hermes-agent/scripts/backup.ps1` | `hermes backup` の Task Scheduler 用ラッパ |
 | `deploy/hermes-agent/README.md` | デプロイ・運用手順 |
 | `docs/handoff/` | AI handoff（Issue ベース）の運用ガイド |
 | `docs/decisions/` | ADR |

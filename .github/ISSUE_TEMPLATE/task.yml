@@ -45,7 +45,7 @@ body:
       label: Acceptance criteria
       description: 完了と認めるための条件
       placeholder: |
-        - npm run typecheck / npm run build が通る
+        - 変更対象の検証が pass する（compose 変更なら `docker compose config`、script なら dry-run、image なら build + 起動、等）
         - 影響箇所を手動確認
     validations:
       required: true
@@ -56,10 +56,10 @@ body:
       label: Evidence of acceptance（人間が確認する手順）
       description: コードを読まずに accept できる手順を書く。AI が完了申請時にこの手順を実行し、出力・ログ・スクショを Issue に貼る。
       placeholder: |
-        1. npm run dev で起動
-        2. /settings を開きダークモードトグルを ON
-        3. 背景が #1a1a1a になることを確認
-        4. リロードして設定が保持されていることを確認
+        1. `docker compose -f deploy/hermes-agent/docker-compose.windows.yml up -d` でコンテナを起動
+        2. `docker exec -it hermes /opt/hermes/.venv/bin/hermes status` で gateway が running か確認
+        3. 該当する動作確認手順を実行（messenger 経由、CLI 経由、API 経由など）
+        4. 期待される結果と一致することを確認
     validations:
       required: true
 
