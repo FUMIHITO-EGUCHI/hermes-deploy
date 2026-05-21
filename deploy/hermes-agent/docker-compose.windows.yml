@@ -55,6 +55,13 @@ services:
       # 127.0.0.1. LAN cannot reach this.
       - API_SERVER_HOST=0.0.0.0
       - API_SERVER_PORT=8642
+      # Optional: route browser tool calls through the CloakBrowser stealth
+      # Chromium sidecar (see the `cloakbrowser` service below). Default is
+      # empty → Hermes falls back to its own local headless agent-browser.
+      # Enable with: `docker compose --profile browser up -d` (the profile
+      # also boots the cloakbrowser service). Default network DNS resolves
+      # `hermes-cloakbrowser` to the sidecar; no host port mapping needed.
+      - BROWSER_CDP_URL=${BROWSER_CDP_URL-}
     ports:
       # OpenAI-compatible API server — host loopback only. hermes-desktop's
       # remote mode points here. For LAN access use SSH tunnel or Tailscale.
@@ -92,6 +99,72 @@ services:
     command: ["dashboard", "--host", "0.0.0.0", "--no-open", "--insecure"]
     # `--insecure` rationale: same as gateway above. Dashboard binds 0.0.0.0
     # INSIDE the container; `ports:` only publishes to 127.0.0.1 on the host.
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Optional: CloakBrowser stealth Chromium sidecar
+  #
+  # https://github.com/CloakHQ/CloakBrowser — Chromium binary with 58
+  # C++ source-level fingerprint patches. Passes Cloudflare Turnstile,
+  # FingerprintJS, BrowserScan, and scores ~0.9 on reCAPTCHA v3.
+  #
+  # Opt-in: NOT started by `docker compose up -d`. Boot with
+  #   docker compose -f docker-compose.windows.yml --profile browser up -d
+  # The profile starts this service AND keeps gateway/dashboard up; Hermes
+  # picks up the sidecar via the BROWSER_CDP_URL env wired into the gateway
+  # service above.
+  #
+  # The image ships `cloakserve` — a CDP multiplexer that exposes Chromium
+  # DevTools Protocol on port 9222, designed for Playwright
+  # `connect_over_cdp`. Hermes' browser tool consumes the CDP URL natively
+  # via `tools/browser_tool.py:_resolve_cdp_override()` (env > config.yaml
+  # precedence), so no code changes are needed.
+  #
+  # License: wrapper MIT, binary is royalty-free for personal + commercial
+  # use but NOT redistributable. See https://github.com/CloakHQ/CloakBrowser
+  # BINARY-LICENSE.md before forking or rebuilding the image.
+  # ──────────────────────────────────────────────────────────────────────────
+  cloakbrowser:
+    # TODO: pin to a SHA256 digest once chosen. See #21.
+    image: cloakhq/cloakbrowser
+    container_name: hermes-cloakbrowser
+    # `restart: "no"` — explicit. The browser sidecar is opt-in; we don't
+    # want Docker to auto-restart it on host reboot. The user re-enables
+    # by re-running `docker compose --profile browser up -d`. (Compare
+    # with gateway/dashboard's `unless-stopped` — those ARE meant to be
+    # always-on.)
+    restart: "no"
+    profiles: ["browser"]
+    # Chromium renderer crashes (`SIGBUS`, "Failed to create SharedMemory")
+    # when /dev/shm is at Docker's default 64 MB. 256 MB is the common
+    # recommendation that covers normal page loads + a few tabs.
+    shm_size: '256m'
+    # `cloakserve` listens on $PORT (default 9222) and routes incoming CDP
+    # connections to per-fingerprint Chromium processes. The bundled
+    # docker-entrypoint.sh starts Xvfb first (headed-mode required for
+    # Turnstile passes), then execs this command.
+    command: ["cloakserve", "--port=9222"]
+    # No `ports:` block — cloakbrowser is only reachable from sibling
+    # compose services on the default compose network. Host has no direct
+    # access, which is intentional (the CDP endpoint is unauthenticated).
+    # Hermes gateway reaches it via Docker DNS as `hermes-cloakbrowser:9222`.
+    #
+    # Lateral-movement note: any other service added to this compose file
+    # (now or in the future) will also be able to reach this CDP endpoint
+    # over the default network. CDP can navigate to arbitrary URLs and
+    # read local files inside its sandbox — treat it like an unauthenticated
+    # internal API. If you add a third service that doesn't need browser
+    # access, put it on a separate `networks:` block to isolate.
+    expose:
+      - "9222"
+    # Xvfb + cloakserve take ~5-15s to come up on cold start (especially
+    # first run after image pull). Without this, gateway boots faster and
+    # the first browser tool call lands before the CDP socket is open.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9222/json/version > /dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
 
 volumes:
   hermes-data:

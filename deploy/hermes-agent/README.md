@@ -215,6 +215,76 @@ default.
 
 ---
 
+## Browser tooling — stealth Chromium sidecar (optional)
+
+Hermes' `browser_*` tools (web navigation, content extraction, form
+filling) need a Chromium engine. By default they spawn the built-in
+`agent-browser` headless CLI inside the container — fine for plain
+sites, blocked by Cloudflare Turnstile / FingerprintJS / reCAPTCHA.
+
+For protected sites the compose file ships an opt-in
+[CloakBrowser](https://github.com/CloakHQ/CloakBrowser) sidecar:
+a real Chromium binary with 58 C++ source-level fingerprint patches.
+Hermes connects to it via CDP — no code changes needed, the existing
+`BROWSER_CDP_URL` override path picks it up.
+
+### Enable
+
+```powershell
+$env:BROWSER_CDP_URL = "http://hermes-cloakbrowser:9222"
+docker compose -f docker-compose.windows.yml --profile browser up -d
+```
+
+The `--profile browser` flag boots the `cloakbrowser` service alongside
+gateway/dashboard. First `up -d` pulls ~200 MB (Chromium + Xvfb +
+Python wrapper). Subsequent boots reuse the cached image.
+
+Verify:
+```powershell
+docker compose -f docker-compose.windows.yml ps cloakbrowser
+docker exec hermes-cloakbrowser curl -s http://localhost:9222/json/version
+```
+
+### Disable
+
+Re-boot without the profile / env:
+```powershell
+Remove-Item Env:\BROWSER_CDP_URL
+docker compose -f docker-compose.windows.yml stop cloakbrowser
+docker compose -f docker-compose.windows.yml up -d        # gateway picks up empty env on next restart
+```
+
+Hermes falls back to the built-in `agent-browser` headless CLI.
+
+The sidecar uses `restart: "no"` (unlike gateway/dashboard's
+`unless-stopped`), so a host reboot leaves it down until you re-run
+`up -d --profile browser` — preserving the opt-in guarantee.
+
+### Network exposure
+
+The CDP endpoint at `hermes-cloakbrowser:9222` is unauthenticated, but
+not reachable from the host (no `ports:` mapping). It IS reachable from
+any other service on the default compose network — current setup is
+just gateway/dashboard, both trusted. If you add a third service in the
+future that doesn't need browser access (a metrics exporter, a webhook
+listener, etc), put it on a separate `networks:` block; CDP can navigate
+to arbitrary URLs and read sandboxed local files, so a compromised
+sibling service could pivot through it.
+
+### License & scope notes
+
+- **Wrapper**: MIT — fine to copy / fork.
+- **Binary**: royalty-free for personal + commercial use, NOT
+  redistributable. We use the official `cloakhq/cloakbrowser` image
+  unmodified, which is the permitted path. Do not rebuild / fork the
+  image without reading
+  [BINARY-LICENSE.md](https://github.com/CloakHQ/CloakBrowser/blob/main/BINARY-LICENSE.md).
+- **Ethics**: bypassing bot detection is grey area for the target
+  sites' ToS. Hermes does not enforce that; you do. Reserve this for
+  pages you have a legitimate reason to access.
+
+---
+
 ## Security posture
 
 - All published ports bound to `127.0.0.1`. LAN cannot reach the
