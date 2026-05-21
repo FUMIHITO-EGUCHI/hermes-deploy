@@ -40,7 +40,7 @@ paths:
    - PR 作成後: `in-progress` → `review-pending`（claude-pr-review.yml が起動）
    - review 通過後: `review-pending` → `evidence-required`。Issue Template の "Evidence of acceptance" 手順を実機で実行し、結果を1コメントに：
      - `## Result`（3〜10 行で要約）
-     - `## Verification`（typecheck / build の末尾）
+     - `## Verification`（変更箇所の検証コマンドとその末尾）
      - `## Evidence`（手順の実行結果 / スクショ / ログ）
      - `## Changed files`（`git diff --name-only` 結果）
      - `## Rework count`（`rework: N`）
@@ -72,13 +72,12 @@ paths:
 
 ## Definition of Done（ADR-0003 6状態フロー）
 
-1. `npm run typecheck` pass
-2. `npm run build` pass
-3. `claude-pr-review.yml` の review 通過
-4. `status: evidence-required` 付与 + Result / Verification / Evidence / Changed files / Rework count が揃ったコメント1件
-5. commit message に `#<issue>` 含む
-6. 人間が evidence を確認し `status: accepted` を付ける（AI 対象外）
-7. 人間が Issue を close（AI 対象外）
+1. 変更箇所の検証 pass（compose 変更なら `docker compose -f ... config`、script 変更なら dry-run、image 変更なら build + container 起動、docs 変更なら markdown lint 等、対象に応じて選ぶ）
+2. `claude-pr-review.yml` の review 通過
+3. `status: evidence-required` 付与 + Result / Verification / Evidence / Changed files / Rework count が揃ったコメント1件
+4. commit message に `#<issue>` 含む（雑務は `[skip-issue]`）
+5. 人間が evidence を確認し `status: accepted` を付ける（AI 対象外）
+6. 人間が Issue を close（AI 対象外）
 
 ## Never
 

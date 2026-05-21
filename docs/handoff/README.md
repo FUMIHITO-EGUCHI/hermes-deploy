@@ -95,8 +95,10 @@ blank issue は無効化している。
 <実装内容の要約を 3〜10 行で>
 
 ## Verification
-<`npm run typecheck` の出力（末尾 20 行程度）>
-<`npm run build` の出力（末尾 20 行程度）>
+<変更箇所に対応する検証コマンドの出力（末尾 20 行程度）。
+ 例: `docker compose -f deploy/hermes-agent/docker-compose.windows.yml config`、
+ `docker compose ... build` の最後の数行、
+ `docker exec -it hermes /opt/hermes/.venv/bin/hermes status` の出力、等>
 
 ## Evidence
 <task.yml の "Evidence of acceptance" 手順を実行した結果>
@@ -230,13 +232,12 @@ Issue を作ると自動でボードに乗るよう auto-add ワークフロー�
 
 ## 8. Definition of Done（ADR-0003 6状態フロー）
 
-AI が満たす（1〜5）:
+AI が満たす（1〜4）:
 
-1. `npm run typecheck` pass
-2. `npm run build` pass
-3. `status: evidence-required` ラベルが付いている
-4. Evidence コメントに `## Result` / `## Verification` / `## Evidence` / `## Changed files` / `## Rework count` が揃っている
-5. commit message に `#<issue>` が含まれている
+1. 変更箇所の検証 pass（対象に応じて compose の `config`、script の dry-run、image の build、container 再起動、markdown lint 等から選ぶ）
+2. `status: evidence-required` ラベルが付いている
+3. Evidence コメントに `## Result` / `## Verification` / `## Evidence` / `## Changed files` / `## Rework count` が揃っている
+4. commit message に `#<issue>` が含まれている（雑務は `[skip-issue]`）
 
 人間が満たす（6〜7）:
 

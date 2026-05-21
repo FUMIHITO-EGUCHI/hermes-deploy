@@ -8,23 +8,21 @@
 
 ## 技術スタック
 
-<!-- @stack:replace -->
-- 言語/ランタイム: TODO
-- 主要ライブラリ: TODO
-- ビルドツール: TODO
-<!-- @stack:end -->
+- 構成物: `deploy/hermes-agent/docker-compose.windows.yml` (Hermes Agent コンテナ起動定義)
+- 実行環境: Windows 11 + Docker Desktop (WSL2 backend)、PowerShell 7
+- 言語ランタイム不要: アプリ本体は upstream の Hermes Agent (Python) が container 内で完結。本リポは設定だけを管理
 
 ## コマンド
 
-<!-- @stack:replace -->
+このリポ自体にビルド対象はない。動作確認は変更対象に応じて選ぶ:
+
 | コマンド | 用途 |
 |---|---|
-| `npm run dev` | 開発サーバー |
-| `npm run build` | ビルド |
-| `npm run typecheck` | 型チェック |
-<!-- @stack:end -->
+| `docker compose -f deploy/hermes-agent/docker-compose.windows.yml config` | compose 設定検証 |
+| `docker compose -f deploy/hermes-agent/docker-compose.windows.yml up -d` | compose 起動 |
+| `docker exec -it hermes /opt/hermes/.venv/bin/hermes status` | ヘルスチェック |
 
-完了報告前は `npm run typecheck` と `npm run build`、必要な手動確認を行う。
+完了報告前は変更箇所の手動確認 (compose ならコンテナ再起動で立ち上がるか) を行う。
 
 ## タスク管理（AI handoff）
 
@@ -42,13 +40,12 @@
 
 ## ディレクトリ構造
 
-<!-- @stack:replace -->
 | パス | 役割 |
 |---|---|
-| `src/` | アプリ本体 |
+| `deploy/hermes-agent/docker-compose.windows.yml` | Hermes Agent コンテナ定義 (Windows + Docker Desktop) |
+| `deploy/hermes-agent/README.md` | デプロイ・運用手順 |
 | `docs/handoff/` | AI handoff（Issue ベース）の運用ガイド |
 | `docs/decisions/` | ADR |
-<!-- @stack:end -->
 
 ## 行動原則
 
