@@ -8,27 +8,23 @@
 # isn't versionable here. Keep this script tiny: no BW, no env injection,
 # no provider logic — just the orchestration glue around `hermes backup`.
 #
-# Usage:
-#   pwsh -NoProfile -File scripts/backup.ps1
-#   pwsh -NoProfile -File scripts/backup.ps1 -OutDir D:\hermes-backups -KeepLast 12
-#
-# Task Scheduler setup (one-time, per host):
-#   1. Task Scheduler → Create Basic Task → name "Hermes Weekly Backup"
-#   2. Trigger: Weekly (pick a low-activity time)
-#   3. Action: Start a program
-#        Program: pwsh.exe
-#        Arguments: -NoProfile -File "C:\path\to\backup.ps1"
-#   4. Conditions → leave "Start only if computer is on AC power" off
-#      (desktop has no battery) and "Wake the computer" off.
-#   5. Settings → "Run task as soon as possible after a scheduled start
-#      is missed" ON (covers reboots through scheduled time).
+# Full usage, parameter docs, and Task Scheduler setup walkthrough live
+# in `deploy/hermes-agent/README.md` (the "Backups" section). This
+# header sticks to invariants the code itself depends on.
 
 [CmdletBinding()]
 param(
     [string]$Container = 'hermes',
     [string]$OutDir    = "$env:USERPROFILE\hermes-backups",
+    # Absolute path to the `hermes` entry point inside the container.
+    # Hardcoded here (not exported through compose env) because:
+    #   - `docker exec` runs without the container's ENTRYPOINT shell init,
+    #     so `$PATH` doesn't include venv/bin and a bare `hermes` fails.
+    #   - The upstream image's venv path is stable across releases; if it
+    #     ever moves, change this default once.
+    [string]$HermesBin = '/opt/hermes/.venv/bin/hermes',
     # Retention: how many most-recent backups to keep. Older ones get
-    # deleted. 0 disables sweep.
+    # deleted. 0 disables the sweep entirely.
     [int]   $KeepLast  = 8
 )
 
@@ -49,26 +45,32 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 #    Using a deterministic in-container path so we don't have to grep
 #    the command's output for the actual filename.
 $inContainerPath = '/opt/data/backup.zip'
-Write-Host "→ docker exec $Container hermes backup -o $inContainerPath" -ForegroundColor DarkGray
-docker exec $Container /opt/hermes/.venv/bin/hermes backup -o $inContainerPath
+Write-Host "→ docker exec $Container $HermesBin backup -o $inContainerPath" -ForegroundColor DarkGray
+docker exec $Container $HermesBin backup -o $inContainerPath
 if ($LASTEXITCODE -ne 0) {
     throw "hermes backup failed (exit $LASTEXITCODE)"
 }
 
-# 4. Copy out with a timestamped filename.
+# 4. Copy out with a timestamped filename, then always clean up the
+#    in-container temp zip — even if `docker cp` fails. Without the
+#    finally, a transient cp failure leaves /opt/data/backup.zip on the
+#    volume; benign because the next run overwrites it, but it bloats
+#    `hermes backup`'s own working area unnecessarily.
 $ts      = Get-Date -Format 'yyyyMMdd-HHmmss'
 $hostDst = Join-Path $OutDir "hermes-$ts.zip"
 Write-Host "→ docker cp ${Container}:${inContainerPath} `"$hostDst`"" -ForegroundColor DarkGray
-docker cp "${Container}:${inContainerPath}" "$hostDst"
-if ($LASTEXITCODE -ne 0) {
-    throw "docker cp failed (exit $LASTEXITCODE)"
+try {
+    docker cp "${Container}:${inContainerPath}" "$hostDst"
+    if ($LASTEXITCODE -ne 0) {
+        throw "docker cp failed (exit $LASTEXITCODE)"
+    }
+} finally {
+    # 2>$null swallows "file not found" if the backup step never produced
+    # a zip; nothing to clean up in that case.
+    docker exec $Container rm -f $inContainerPath 2>$null | Out-Null
 }
 
-# 5. Remove the in-container temp zip so the volume doesn't accumulate
-#    historical copies — host filesystem holds the retention chain.
-docker exec $Container rm -f $inContainerPath 2>$null | Out-Null
-
-# 6. Retention sweep. Sort by LastWriteTime descending, keep first N,
+# 5. Retention sweep. Sort by LastWriteTime descending, keep first N,
 #    delete the rest.
 if ($KeepLast -gt 0) {
     $old = Get-ChildItem -Path $OutDir -Filter 'hermes-*.zip' -File |
