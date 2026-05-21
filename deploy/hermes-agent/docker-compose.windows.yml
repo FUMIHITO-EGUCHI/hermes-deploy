@@ -55,6 +55,13 @@ services:
       # 127.0.0.1. LAN cannot reach this.
       - API_SERVER_HOST=0.0.0.0
       - API_SERVER_PORT=8642
+      # Optional: route browser tool calls through the CloakBrowser stealth
+      # Chromium sidecar (see the `cloakbrowser` service below). Default is
+      # empty → Hermes falls back to its own local headless agent-browser.
+      # Enable with: `docker compose --profile browser up -d` (the profile
+      # also boots the cloakbrowser service). Default network DNS resolves
+      # `hermes-cloakbrowser` to the sidecar; no host port mapping needed.
+      - BROWSER_CDP_URL=${BROWSER_CDP_URL-}
     ports:
       # OpenAI-compatible API server — host loopback only. hermes-desktop's
       # remote mode points here. For LAN access use SSH tunnel or Tailscale.
@@ -92,6 +99,46 @@ services:
     command: ["dashboard", "--host", "0.0.0.0", "--no-open", "--insecure"]
     # `--insecure` rationale: same as gateway above. Dashboard binds 0.0.0.0
     # INSIDE the container; `ports:` only publishes to 127.0.0.1 on the host.
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Optional: CloakBrowser stealth Chromium sidecar
+  #
+  # https://github.com/CloakHQ/CloakBrowser — Chromium binary with 58
+  # C++ source-level fingerprint patches. Passes Cloudflare Turnstile,
+  # FingerprintJS, BrowserScan, and scores ~0.9 on reCAPTCHA v3.
+  #
+  # Opt-in: NOT started by `docker compose up -d`. Boot with
+  #   docker compose -f docker-compose.windows.yml --profile browser up -d
+  # The profile starts this service AND keeps gateway/dashboard up; Hermes
+  # picks up the sidecar via the BROWSER_CDP_URL env wired into the gateway
+  # service above.
+  #
+  # The image ships `cloakserve` — a CDP multiplexer that exposes Chromium
+  # DevTools Protocol on port 9222, designed for Playwright
+  # `connect_over_cdp`. Hermes' browser tool consumes the CDP URL natively
+  # via `tools/browser_tool.py:_resolve_cdp_override()` (env > config.yaml
+  # precedence), so no code changes are needed.
+  #
+  # License: wrapper MIT, binary is royalty-free for personal + commercial
+  # use but NOT redistributable. See https://github.com/CloakHQ/CloakBrowser
+  # BINARY-LICENSE.md before forking or rebuilding the image.
+  # ──────────────────────────────────────────────────────────────────────────
+  cloakbrowser:
+    image: cloakhq/cloakbrowser
+    container_name: hermes-cloakbrowser
+    restart: unless-stopped
+    profiles: ["browser"]
+    # `cloakserve` listens on $PORT (default 9222) and routes incoming CDP
+    # connections to per-fingerprint Chromium processes. The bundled
+    # docker-entrypoint.sh starts Xvfb first (headed-mode required for
+    # Turnstile passes), then execs this command.
+    command: ["cloakserve", "--port=9222"]
+    # No `ports:` block — cloakbrowser is only reachable from sibling
+    # compose services on the default network. Host has no direct access,
+    # which is intentional (the CDP endpoint is unauthenticated). Hermes
+    # gateway reaches it via Docker DNS as `http://hermes-cloakbrowser:9222`.
+    expose:
+      - "9222"
 
 volumes:
   hermes-data:
