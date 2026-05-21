@@ -66,20 +66,34 @@ services:
       # OpenAI-compatible API server — host loopback only. hermes-desktop's
       # remote mode points here. For LAN access use SSH tunnel or Tailscale.
       - "127.0.0.1:8642:8642"
-    # `--insecure` overrides Hermes' refusal to bind 0.0.0.0 without a bearer
-    # key. The endpoint stays reachable on 127.0.0.1:8642 with NO auth —
-    # safe only because the `ports:` mapping above is loopback-only, so the
-    # exposure surface is just other processes running as your user on this
-    # host.
+    # Bootstrap an API_SERVER_KEY into the named volume on first boot,
+    # then exec `hermes gateway run`. Hermes refuses to bind 0.0.0.0
+    # without a bearer key (`gateway.platforms.api_server.connect()`
+    # explicitly rejects non-loopback hosts when `API_SERVER_KEY` is
+    # unset or contains a placeholder value); container-internal
+    # 0.0.0.0 is required because Docker port-mapping cannot reach a
+    # container's loopback.
     #
-    # THREAT MODEL: any local process (browser extension, malicious npm
-    # postinstall, leaked dev-tools port forwarder, etc.) running as your
-    # user can chat with Hermes and burn provider quota without
-    # authentication. If you don't trust everything that runs locally as
-    # your user, drop `--insecure`, set `API_SERVER_KEY=<random hex>` in
-    # the environment block above, and configure your clients
-    # (hermes-desktop, OpenWebUI) to send it as a bearer token.
-    command: ["gateway", "run", "--insecure"]
+    # The key file lives at `/opt/data/.api_server_key` (mode 600,
+    # inside the named volume — host filesystem never sees it). To
+    # retrieve the bearer for hermes-desktop / OpenWebUI:
+    #   docker exec hermes cat /opt/data/.api_server_key
+    #
+    # To rotate: `docker exec hermes rm /opt/data/.api_server_key` then
+    # `docker compose restart gateway` — a fresh key generates on next
+    # start, and all clients re-pick the new value next time they ask.
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        KEYFILE=/opt/data/.api_server_key
+        if [ ! -s "$$KEYFILE" ]; then
+          python3 -c 'import secrets; print(secrets.token_hex(32))' > "$$KEYFILE"
+          chmod 600 "$$KEYFILE"
+        fi
+        export API_SERVER_KEY="$$(cat $$KEYFILE)"
+        exec /opt/hermes/.venv/bin/hermes gateway run
 
   dashboard:
     image: hermes-agent
